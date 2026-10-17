@@ -505,9 +505,8 @@ namespace LSS
                     {
                         return result;
                     }
-                    result =
-                        // 计算是否提前达到收敛
-                        T resNorm = IsZeroElem(bNorm, eps_) ? res : (res / bNorm);
+                    // 计算是否提前达到收敛
+                    T resNorm = IsZeroElem(bNorm, eps_) ? res : (res / bNorm);
                     if (resNorm < tol)
                     {
                         return LSS_OK; // 收敛，提前返回
