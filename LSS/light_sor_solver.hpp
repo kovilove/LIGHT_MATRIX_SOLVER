@@ -23,6 +23,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace LSS
 {
     // ====================== 求解器全局参数 ======================
@@ -257,23 +261,6 @@ namespace LSS
         }
 
         /**
-         * @brief 依次执行校验条件列表，任一条件成立即返回其对应错误码
-         * @param checkLists 条件-错误码列表（lambda 返回 true 表示"校验失败"）
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
-         */
-        unsigned short Check(const CheckConditionLists &checkLists) const
-        {
-            for (const auto &[checkFunc, errCode] : checkLists)
-            {
-                if ((checkFunc == nullptr) || checkFunc())
-                {
-                    return errCode;
-                }
-            }
-            return LSS_OK;
-        }
-
-        /**
          * @brief 添加矩阵的一行（稠密输入，内部压缩为 CSR 存储）
          * @param vec 该行数据，长度必须 >= colSize，仅前 colSize 个元素有效
          * @return LSS_OK 成功；
@@ -286,40 +273,7 @@ namespace LSS
          */
         unsigned short AddRow(const Vec &vec)
         {
-            auto result = Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return this->rowSize_ >= this->colSize_;
-                 },
-                 LSS_SPARSE_ROW_FULL},
-                {[&]() -> bool
-                 {
-                     return vec.size() < this->colSize_;
-                 },
-                 LSS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     return IsZeroElem(vec[this->rowSize_], this->eps_);
-                 },
-                 LSS_DIAG_ELEM_ZERO},
-                {[&]() -> bool
-                 {
-                     for (size_t i = 0; i < this->colSize_; ++i)
-                     {
-                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
-                         {
-                             return true;
-                         }
-                     }
-                     return false;
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
+            auto result = AddRowAbnormalCheck(vec);
             if (result != LSS_OK)
             {
                 return result;
@@ -410,31 +364,7 @@ namespace LSS
          */
         unsigned short AddRhs(const Vec &vec)
         {
-            auto result = Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return vec.size() < this->colSize_;
-                 },
-                 LSS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     for (size_t i = 0; i < this->colSize_; ++i)
-                     {
-                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
-                         {
-                             return true;
-                         }
-                     }
-                     return false;
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
+            auto result = AddRowByVecAbnormalCheck(vec);
             if (result != LSS_OK)
             {
                 return result;
@@ -454,19 +384,7 @@ namespace LSS
          */
         unsigned short AddRhs(T val)
         {
-            auto result = Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return std::isnan(val) || std::isinf(val);
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
+            auto result = AddRowByValueAbnormalCheck(val);
             if (result != LSS_OK)
             {
                 return result;
@@ -489,31 +407,7 @@ namespace LSS
          */
         unsigned short SetRhs(const Vec &vec)
         {
-            auto result = Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return vec.size() < this->colSize_;
-                 },
-                 LSS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     for (size_t i = 0; i < this->colSize_; ++i)
-                     {
-                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
-                         {
-                             return true;
-                         }
-                     }
-                     return false;
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
+            auto result = SetRhsByVecAbnormalCheck(vec);
             if (result != LSS_OK)
             {
                 return result;
@@ -531,19 +425,7 @@ namespace LSS
          */
         unsigned short SetRhs(T val)
         {
-            auto result = Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return std::isnan(val) || std::isinf(val);
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
+            auto result = SetRhsByValueAbnormalCheck(val);
             if (result != LSS_OK)
             {
                 return result;
@@ -576,31 +458,7 @@ namespace LSS
          */
         unsigned short SOR_Solve(Vec &x, size_t iter, T alphaW, T tol = static_cast<T>(DEFAULT_TOL))
         {
-            auto result = Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return x.size() < this->colSize_;
-                 },
-                 LSS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     return this->rowSize_ < this->colSize_;
-                 },
-                 LSS_SPARSE_ROW_NOT_FULL},
-                {[&]() -> bool
-                 {
-                     return (iter < this->minIter_) || (iter > this->maxIter_) ||
-                            (alphaW <= 0) || (alphaW > this->maxAlphaW_) ||
-                            (tol <= 0) || (tol > static_cast<T>(MAX_SET_TOL));
-                 },
-                 LSS_SOLVE_SET_ERR},
-            });
+            auto result = SolverParaAbnormalCheck(x, iter, alphaW, tol);
             if (result != LSS_OK)
             {
                 return result;
@@ -612,15 +470,10 @@ namespace LSS
             }
 
             // 归一化残差
-            T bNormSq = T{};
-            for (const auto &v : rhs_)
-            {
-                bNormSq += v * v;
-            }
-            T bNorm = std::sqrt(bNormSq);
-
+            T bNorm = ComputeUniformResidual();
             // 初始残差
             T res0 = ComputeResidual(x);
+
             const size_t checkEvery = 10;
             size_t startPos = 0;
             size_t endPos = 0;
@@ -647,29 +500,14 @@ namespace LSS
                 if ((it + 1) % checkEvery == 0)
                 {
                     T res = ComputeResidual(x);
-                    result = Check({
-                        {[&]() -> bool
-                         {
-                             return std::isnan(res) || std::isinf(res);
-                         },
-                         LSS_DIVERGED},
-                        {[&]() -> bool
-                         {
-                             return res > static_cast<T>(MAX_OVERLIMIT_TOL);
-                         },
-                         LSS_DIVERGED},
-                        {[&]() -> bool
-                         {
-                             return (res0 > eps_) && (res > 1000 * res0);
-                         },
-                         LSS_DIVERGED},
-                    });
+                    result = SolverResAbnormalCheck(res, res0, bNorm, tol);
                     if (result != LSS_OK)
                     {
                         return result;
                     }
-                    // 计算是否提前达到收敛
-                    T resNorm = (bNorm > eps_) ? (res / bNorm) : res;
+                    result =
+                        // 计算是否提前达到收敛
+                        T resNorm = IsZeroElem(bNorm, eps_) ? res : (res / bNorm);
                     if (resNorm < tol)
                     {
                         return LSS_OK; // 收敛，提前返回
@@ -681,29 +519,208 @@ namespace LSS
 
     private:
         /**
-         * @brief 计算当前解的绝对残差 L2 范数 ||Ax - b||₂
-         * @param x 解向量
-         * @return 残差 L2 范数
-         * @note 调用前需保证矩阵已装满（rowSize == colSize），
-         *       否则 rowPtr_ 越界（内部函数，由调用方保证）
+         * @brief 依次执行校验条件列表，任一条件成立即返回其对应错误码
+         * @param checkLists 条件-错误码列表（lambda 返回 true 表示"校验失败"）
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
-        T ComputeResidual(const Vec &x) const
+        unsigned short Check(const CheckConditionLists &checkLists) const
         {
-            T res = T{};
-            size_t startPos = 0;
-            size_t endPos = 0;
-            for (size_t i = 0; i < colSize_; i++)
+            for (const auto &[checkFunc, errCode] : checkLists)
             {
-                startPos = rowPtr_[i];
-                endPos = rowPtr_[i + 1];
-                T rhs_i = rhs_[i];
-                for (size_t j = startPos; j < endPos; j++)
+                if ((checkFunc == nullptr) || checkFunc())
                 {
-                    rhs_i -= value_[j] * x[colIdx_[j]];
+                    return errCode;
                 }
-                res += rhs_i * rhs_i;
             }
-            return std::sqrt(res);
+            return LSS_OK;
+        }
+
+        /**
+         * @brief 添加矩阵的一行前的异常检查
+         * @param vec 待添加的行向量
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         */
+        unsigned short AddRowAbnormalCheck(const Vec &vec)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (!this->isValid_);
+                 },
+                 LSS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return this->rowSize_ >= this->colSize_;
+                 },
+                 LSS_SPARSE_ROW_FULL},
+                {[&]() -> bool
+                 {
+                     return vec.size() < this->colSize_;
+                 },
+                 LSS_VEC_LEN_ERR},
+                {[&]() -> bool
+                 {
+                     return IsZeroElem(vec[this->rowSize_], this->eps_);
+                 },
+                 LSS_DIAG_ELEM_ZERO},
+                {[&]() -> bool
+                 {
+                     for (size_t i = 0; i < this->colSize_; ++i)
+                     {
+                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
+                         {
+                             return true;
+                         }
+                     }
+                     return false;
+                 },
+                 LSS_NAN_ELEM_ERR},
+            });
+        }
+        /**
+         * @brief 添加矩阵的一行前的异常检查（仅检查向量长度和 NaN/Inf）
+         * @param vec 待添加的行向量
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         * @note 仅用于累加右端项 rhs += vec 的异常检查，矩阵行数不受影响
+         */
+        unsigned short AddRowByVecAbnormalCheck(const Vec &vec)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (!this->isValid_) ||
+                            (this->rhs_.size() != this->colSize_);
+                 },
+                 LSS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return vec.size() < this->colSize_;
+                 },
+                 LSS_VEC_LEN_ERR},
+                {[&]() -> bool
+                 {
+                     for (size_t i = 0; i < this->colSize_; ++i)
+                     {
+                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
+                         {
+                             return true;
+                         }
+                     }
+                     return false;
+                 },
+                 LSS_NAN_ELEM_ERR},
+            });
+        }
+        /**
+         * @brief 添加矩阵的一个元素前的异常检查
+         * @param val 待添加的元素值
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         */
+        unsigned short AddRowByValueAbnormalCheck(T val)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (!this->isValid_) ||
+                            (this->rhs_.size() != this->colSize_);
+                 },
+                 LSS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return std::isnan(val) || std::isinf(val);
+                 },
+                 LSS_NAN_ELEM_ERR},
+            });
+        }
+        /**
+         * @brief 设置右端项前的异常检查
+         * @param vec 待设置的右端项向量
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         */
+        unsigned short SetRhsByVecAbnormalCheck(const Vec &vec)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (!this->isValid_) ||
+                            (this->rhs_.size() != this->colSize_);
+                 },
+                 LSS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return vec.size() < this->colSize_;
+                 },
+                 LSS_VEC_LEN_ERR},
+                {[&]() -> bool
+                 {
+                     for (size_t i = 0; i < this->colSize_; ++i)
+                     {
+                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
+                         {
+                             return true;
+                         }
+                     }
+                     return false;
+                 },
+                 LSS_NAN_ELEM_ERR},
+            });
+        }
+        /**
+         * @brief 设置右端项前的异常检查（仅检查 NaN/Inf）
+         * @param val 待设置的右端项标量
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         */
+        unsigned short SetRhsByValueAbnormalCheck(T val)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (!this->isValid_) ||
+                            (this->rhs_.size() != this->colSize_);
+                 },
+                 LSS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return std::isnan(val) || std::isinf(val);
+                 },
+                 LSS_NAN_ELEM_ERR},
+            });
+        }
+        /**
+         * @brief SOR 求解前的异常检查
+         * @param x 解向量
+         * @param iter 最大迭代次数
+         * @param alphaW 松弛因子
+         * @param tol 收敛容差
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         */
+        unsigned short SolverParaAbnormalCheck(const Vec &x, size_t iter, T alphaW, T tol)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (!this->isValid_) ||
+                            (this->rhs_.size() != this->colSize_);
+                 },
+                 LSS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return x.size() < this->colSize_;
+                 },
+                 LSS_VEC_LEN_ERR},
+                {[&]() -> bool
+                 {
+                     return this->rowSize_ < this->colSize_;
+                 },
+                 LSS_SPARSE_ROW_NOT_FULL},
+                {[&]() -> bool
+                 {
+                     return (iter < this->minIter_) || (iter > this->maxIter_) ||
+                            (alphaW <= 0) || (alphaW > this->maxAlphaW_) ||
+                            (tol <= 0) || (tol > static_cast<T>(MAX_SET_TOL));
+                 },
+                 LSS_SOLVE_SET_ERR},
+            });
         }
 
         /**
@@ -755,6 +772,75 @@ namespace LSS
                 }
             }
             return LSS_DIAG_DOM;
+        }
+
+        /**
+         * @brief SOR 求解迭代时的异常检查
+         * @param res 当前残差
+         * @param res0 初始残差
+         * @param bNorm 均匀残差 L2 范数 ||b||₂
+         * @param tol 收敛容差
+         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         */
+        unsigned short SolverResAbnormalCheck(T res, T res0, T bNorm, T tol)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return std::isnan(res) || std::isinf(res);
+                 },
+                 LSS_DIVERGED},
+                {[&]() -> bool
+                 {
+                     return res > static_cast<T>(MAX_OVERLIMIT_TOL);
+                 },
+                 LSS_DIVERGED},
+                {[&]() -> bool
+                 {
+                     return (res0 > eps_) && (res > 1000 * res0);
+                 },
+                 LSS_DIVERGED},
+            });
+        }
+
+        /**
+         * @brief 计算均匀残差 L2 范数 ||b||₂
+         * @return 均匀残差 L2 范数
+         */
+        T ComputeUniformResidual()
+        {
+            T res = T{};
+            for (size_t i = 0; i < colSize_; i++)
+            {
+                res += rhs_[i] * rhs_[i];
+            }
+            return std::sqrt(res);
+        }
+
+        /**
+         * @brief 计算当前解的绝对残差 L2 范数 ||Ax - b||₂
+         * @param x 解向量
+         * @return 残差 L2 范数
+         * @note 调用前需保证矩阵已装满（rowSize == colSize），
+         *       否则 rowPtr_ 越界（内部函数，由调用方保证）
+         */
+        T ComputeResidual(const Vec &x) const
+        {
+            T res = T{};
+            size_t startPos = 0;
+            size_t endPos = 0;
+            for (size_t i = 0; i < colSize_; i++)
+            {
+                startPos = rowPtr_[i];
+                endPos = rowPtr_[i + 1];
+                T rhs_i = rhs_[i];
+                for (size_t j = startPos; j < endPos; j++)
+                {
+                    rhs_i -= value_[j] * x[colIdx_[j]];
+                }
+                res += rhs_i * rhs_i;
+            }
+            return std::sqrt(res);
         }
 
     private:
