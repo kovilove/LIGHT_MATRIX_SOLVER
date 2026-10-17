@@ -58,6 +58,18 @@ namespace LSS
     };
 
     /**
+     * @brief 计算模式枚举
+     * @note  串行模式（默认）/ 并行模式 / 自动模式（保留）
+     */
+    enum CalcProcessMode : unsigned short
+    {
+        SOR_SERIAL_MODE = 0,    // 串行模式
+        SOR_MULTI_PROCESS_MODE, // 并行模式
+        SOR_AUTO_MODE,          // 自动模式
+        SOR_MODE_MAX,
+    };
+
+    /**
      * @brief 判断元素是否接近零
      * @param cmpValue 待判断的元素值
      * @param epsilon 判零阈值
@@ -204,6 +216,28 @@ namespace LSS
         void ClearRhs()
         {
             rhs_.assign(colSize_, T{});
+        }
+
+        /**
+         * @brief 设置多进程模式
+         * @param mode 模式：0 串行（默认），1 并行
+         */
+        void SetMultiProcessMode(unsigned short mode)
+        {
+            if (mode >= SOR_MODE_MAX)
+            {
+                return;
+            }
+            multiProcessMode_ = static_cast<CalcProcessMode>(mode);
+        }
+
+        /**
+         * @brief 查询多进程模式
+         * @return 模式：0 串行（默认），1 并行
+         */
+        CalcProcessMode GetMultiProcessMode() const
+        {
+            return multiProcessMode_;
         }
 
         /**
@@ -458,6 +492,34 @@ namespace LSS
          */
         unsigned short SOR_Solve(Vec &x, size_t iter, T alphaW, T tol = static_cast<T>(DEFAULT_TOL))
         {
+#ifdef _OPENMP
+            maxThreads_ = omp_get_max_threads();
+#endif
+            if (multiProcessMode_ == SOR_SERIAL_MODE)
+            {
+                return SOR_Serial_Solve(x, iter, alphaW, tol);
+            }
+            else if (multiProcessMode_ == SOR_MULTI_PROCESS_MODE)
+            {
+                return SOR_Multi_Process_Solve(x, iter, alphaW, tol);
+            }
+            else if (multiProcessMode_ == SOR_AUTO_MODE)
+            {
+                if ((maxThreads_ == 1) || (colSize_ <= 1000))
+                {
+                    return SOR_Serial_Solve(x, iter, alphaW, tol);
+                }
+                else
+                {
+                    return SOR_Multi_Process_Solve(x, iter, alphaW, tol);
+                }
+            }
+            maxThreads_ = 1;
+            return LSS_ERR;
+        }
+
+        unsigned short SOR_Serial_Solve(Vec &x, size_t iter, T alphaW, T tol = static_cast<T>(DEFAULT_TOL))
+        {
             auto result = SolverParaAbnormalCheck(x, iter, alphaW, tol);
             if (result != LSS_OK)
             {
@@ -475,16 +537,75 @@ namespace LSS
             T res0 = ComputeResidual(x);
 
             const size_t checkEvery = 10;
-            size_t startPos = 0;
-            size_t endPos = 0;
 
             // 主迭代计算
             for (size_t it = 0; it < iter; it++)
             {
                 for (size_t i = 0; i < colSize_; i++)
                 {
-                    startPos = rowPtr_[i];
-                    endPos = rowPtr_[i + 1];
+                    size_t startPos = rowPtr_[i];
+                    size_t endPos = rowPtr_[i + 1];
+                    T rhs_i = rhs_[i];
+                    T diagValue = value_[diagIdx_[i]];
+                    for (size_t j = startPos; j < endPos; j++)
+                    {
+                        if (colIdx_[j] != i)
+                        {
+                            rhs_i -= value_[j] * x[colIdx_[j]];
+                        }
+                    }
+                    x[i] = (1 - alphaW) * x[i] + alphaW * rhs_i / diagValue;
+                }
+
+                if ((it + 1) % checkEvery == 0)
+                {
+                    T res = ComputeResidual(x);
+                    result = SolverResAbnormalCheck(res, res0, bNorm, tol);
+                    if (result != LSS_OK)
+                    {
+                        return result;
+                    }
+                    // 计算是否提前达到收敛
+                    T resNorm = IsZeroElem(bNorm, eps_) ? res : (res / bNorm);
+                    if (resNorm < tol)
+                    {
+                        return LSS_OK; // 收敛，提前返回
+                    }
+                }
+            }
+            return LSS_NOT_CONVERGED;
+        }
+
+        unsigned short SOR_Multi_Process_Solve(Vec &x, size_t iter, T alphaW, T tol = static_cast<T>(DEFAULT_TOL))
+        {
+            auto result = SolverParaAbnormalCheck(x, iter, alphaW, tol);
+            if (result != LSS_OK)
+            {
+                return result;
+            }
+            // 判断对角元素是否占优
+            if (IsStrictlyDiagonallyDominant() != LSS_DIAG_DOM)
+            {
+                /* do something */
+            }
+
+            // 归一化残差
+            T bNorm = ComputeUniformResidual();
+            // 初始残差
+            T res0 = ComputeResidual(x);
+
+            const size_t checkEvery = 10;
+
+            // 主迭代计算
+            for (size_t it = 0; it < iter; it++)
+            {
+#ifdef _OPENMP
+#pragma omp parallel for default(shared) schedule(static)
+#endif
+                for (size_t i = 0; i < colSize_; i++)
+                {
+                    size_t startPos = rowPtr_[i];
+                    size_t endPos = rowPtr_[i + 1];
                     T rhs_i = rhs_[i];
                     T diagValue = value_[diagIdx_[i]];
                     for (size_t j = startPos; j < endPos; j++)
@@ -843,15 +964,17 @@ namespace LSS
         }
 
     private:
-        std::vector<T> value_;                             // 非零元素值（CSR）
-        std::vector<size_t> colIdx_;                       // 非零元素列索引（CSR）
-        std::vector<size_t> rowPtr_;                       // 每行起始偏移（CSR，长度 = 行数+1）
-        std::vector<size_t> diagIdx_;                      // 每行对角元在 value_ 中的下标
-        std::vector<T> rhs_;                               // 右端项 b
-        T eps_ = static_cast<T>(DEFAULT_EPSILON);          // 判零阈值
-        const size_t minIter_ = {MIN_ITER};                // 最小迭代次数
-        const size_t maxIter_ = {MAX_ITER};                // 最大迭代次数
-        const T maxAlphaW_ = {static_cast<T>(MAX_ALPHAW)}; // 松弛因子上限
+        std::vector<T> value_;                                 // 非零元素值（CSR）
+        std::vector<size_t> colIdx_;                           // 非零元素列索引（CSR）
+        std::vector<size_t> rowPtr_;                           // 每行起始偏移（CSR，长度 = 行数+1）
+        std::vector<size_t> diagIdx_;                          // 每行对角元在 value_ 中的下标
+        std::vector<T> rhs_;                                   // 右端项 b
+        T eps_ = static_cast<T>(DEFAULT_EPSILON);              // 判零阈值
+        const T maxAlphaW_ = {static_cast<T>(MAX_ALPHAW)};     // 松弛因子上限
+        const size_t minIter_ = {MIN_ITER};                    // 最小迭代次数
+        const size_t maxIter_ = {MAX_ITER};                    // 最大迭代次数
+        size_t maxThreads_ = {1};                              // 最大线程数（OpenMP）
+        CalcProcessMode multiProcessMode_ = {SOR_SERIAL_MODE}; // 并行模式标志
     };
 }
 
