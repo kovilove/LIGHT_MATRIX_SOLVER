@@ -5,6 +5,8 @@
  */
 
 #include <iostream>
+#include <thread>
+#include <chrono>
 #include "../LSS/light_sor_solver.hpp"
 
 using std::cout;
@@ -42,11 +44,18 @@ int main()
     // SetRhs - 添加右端项
     mtx.SetRhs(rhs);
     // SOR_Solve -  SOR求解
-    if (mtx.SOR_Solve(x, 1000, 0.5) != LSS_OK)
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    auto result = mtx.SOR_Solve(x, 1000, 0.5);
+    if (result != LSS_OK)
     {
         cout << "calculate err";
         return 1;
     }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+    std::cout << "SOR_Solve time: " << duration.count() << " microseconds" << endl;
     // 打印机求解量
     for (auto &ele : x)
     {
