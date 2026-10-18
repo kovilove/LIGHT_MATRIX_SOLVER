@@ -631,9 +631,6 @@ namespace LSS
                 return result;
             }
 
-            // 归一化残差 / 初始残差
-            T bNorm = ComputeUniformResidual(mat, rhs);
-            T res0 = ComputeResidual(mat, x, rhs);
 #ifdef _OPENMP
             maxThread_ = static_cast<unsigned short>(omp_get_max_threads());
 #endif
@@ -641,23 +638,23 @@ namespace LSS
             {
             case SOR_SERIAL_MODE:
             {
-                result = SerialSolve(mat, x, rhs, bNorm, res0);
+                result = SerialSolve(mat, x, rhs);
                 break;
             }
             case SOR_MULTI_PROCESS_MODE:
             {
-                result = MultiProcSolve(mat, x, rhs, bNorm, res0);
+                result = MultiProcSolve(mat, x, rhs);
                 break;
             }
             case SOR_AUTO_MODE:
             {
                 if ((maxThread_ == 1) || (mat.ColSize() / maxThread_ < 1000))
                 {
-                    result = SerialSolve(mat, x, rhs, bNorm, res0);
+                    result = SerialSolve(mat, x, rhs);
                 }
                 else
                 {
-                    result = MultiProcSolve(mat, x, rhs, bNorm, res0);
+                    result = MultiProcSolve(mat, x, rhs);
                 }
                 break;
             }
@@ -791,8 +788,7 @@ namespace LSS
          * @param res0 初始残差
          * @return 收敛/发散/未收敛错误码
          */
-        unsigned short SerialSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs,
-                                   T bNorm, T res0)
+        unsigned short SerialSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs)
         {
             const auto &value = mat.Values();
             const auto &colIdx = mat.ColIdx();
@@ -804,6 +800,10 @@ namespace LSS
             iterCnt_ = 0;
             converged_ = false;
             const size_t checkEvery = 10;
+
+            // 归一化残差 / 初始残差
+            T bNorm = ComputeUniformResidual(mat, rhs);
+            T res0 = ComputeResidual(mat, x, rhs);
 
             for (size_t it = 0; it < maxIter_; it++)
             {
@@ -852,12 +852,11 @@ namespace LSS
          * @param res0 初始残差
          * @return 收敛/发散/未收敛错误码
          */
-        unsigned short MultiProcSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs,
-                                      T bNorm, T res0)
+        unsigned short MultiProcSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs)
         {
             if (!BuildRedBlackColoring(mat))
             {
-                return SerialSolve(mat, x, rhs, bNorm, res0); // 非二分图退化串行
+                return SerialSolve(mat, x, rhs); // 非二分图退化串行
             }
 
             const auto &value = mat.Values();
@@ -870,6 +869,9 @@ namespace LSS
             iterCnt_ = 0;
             converged_ = false;
             const size_t checkEvery = 10;
+            // 归一化残差 / 初始残差
+            T bNorm = ComputeUniformResidual(mat, rhs);
+            T res0 = ComputeResidual(mat, x, rhs);
 
             for (size_t it = 0; it < maxIter_; it++)
             {
