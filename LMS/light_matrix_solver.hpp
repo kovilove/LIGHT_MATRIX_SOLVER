@@ -88,6 +88,7 @@ namespace LMS
     {
         LMS_DEFAULT = 0,
         LMS_SOR_SOLVER,
+        LMS_JACOBI_SOLVER,
         LMS_SOLVER_TYPE_MAX,
     };
 
@@ -632,9 +633,118 @@ namespace LMS
             return mode_;
         }
 
+        /**
+         * @brief 计算右端项均匀范数 ||b||₂（归一化残差的分母）
+         * @param mat 系数矩阵（用于取列数，保证与残差口径一致）
+         * @param rhs 右端项
+         * @return ||b||₂ = sqrt(Σ_{i<ColSize} rhs[i]²)
+         * @note 使用前务必确保 mat / rhs 长度足够匹配
+         */
+        T ComputeUniformResidual(const SparseMatrix<T> &mat, const Vec &rhs) const
+        {
+            T res = T{};
+            for (size_t i = 0; i < mat.ColSize(); i++)
+            {
+                res += rhs[i] * rhs[i];
+            }
+            return std::sqrt(res);
+        }
+
+        /**
+         * @brief 计算当前解的绝对残差 L2 范数 ||Ax - b||₂
+         * @param x 解向量
+         * @return 残差 L2 范数
+         * @note 调用前需保证矩阵已装满（rowSize == colSize），
+         *       否则 rowPtr_ 越界（内部函数，由调用方保证）
+         *       使用前务必确保 mat / x / rhs 长度足够匹配
+         */
+        T ComputeResidual(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
+        {
+            const auto &value = mat.Values();
+            const auto &colIdx = mat.ColIdx();
+            const auto &rowPtr = mat.RowPtr();
+            T res = T{};
+            for (size_t i = 0; i < mat.ColSize(); i++)
+            {
+                size_t startPos = rowPtr[i];
+                size_t endPos = rowPtr[i + 1];
+                T rhs_i = rhs[i];
+                for (size_t j = startPos; j < endPos; j++)
+                {
+                    rhs_i -= value[j] * x[colIdx[j]];
+                }
+                res += rhs_i * rhs_i;
+            }
+            return std::sqrt(res);
+        }
+
     protected:
         LinearSolverBase() = default;
 
+        /**
+         * @brief 求解前矩阵与向量通用校验（不含各求解器参数范围）
+         * @param mat 系数矩阵
+         * @param x 解向量
+         * @param rhs 右端项
+         * @return LMS_OK 全部通过；否则返回第一个失败条件对应的错误码
+         * @note 具体求解器在本校验后追加各自的构造参数范围检查
+         */
+        unsigned short PreSolveCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (!mat.IsValid()) || (mat.ColSize() == 0);
+                 },
+                 LMS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return (x.size() < mat.ColSize()) ||
+                            (rhs.size() < mat.ColSize());
+                 },
+                 LMS_VEC_LEN_ERR},
+                {[&]() -> bool
+                 {
+                     for (size_t i = 0; i < mat.ColSize(); ++i)
+                     {
+                         if (std::isnan(x[i]) || std::isinf(x[i]) ||
+                             std::isnan(rhs[i]) || std::isinf(rhs[i]))
+                         {
+                             return true;
+                         }
+                     }
+                     return false;
+                 },
+                 LMS_NAN_ELEM_ERR},
+                {[&]() -> bool
+                 {
+                     return mat.RowSize() < mat.ColSize();
+                 },
+                 LMS_SPARSE_ROW_NOT_FULL},
+            });
+        }
+
+        /**
+         * @brief 迭代过程中的发散检查（各求解器共享）
+         * @param res 当前残差
+         * @param res0 初始残差
+         * @param eps 判零阈值
+         * @return LMS_OK 正常；LMS_DIVERGED 发散
+         */
+        unsigned short DivergenceCheck(T res, T res0, T eps) const
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return std::isnan(res) || std::isinf(res) ||
+                            (res > static_cast<T>(MAX_OVERLIMIT_TOL)) ||
+                            ((res0 > eps) && (res > 1000 * res0));
+                 },
+                 LMS_DIVERGED},
+            });
+        }
+
+    protected:
         T finalRes_ = T{};         // 最终残差
         size_t iterCnt_ = {0};     // 实际迭代次数
         bool converged_ = {false}; // 是否收敛
@@ -673,6 +783,8 @@ namespace LMS
             : maxIter_(maxIter), omega_(omega), tol_(tol)
         {
         }
+
+        ~SORSolver() = default;
 
         /**
          * @brief 求解线性方程组 A x = b
@@ -755,37 +867,13 @@ namespace LMS
          */
         unsigned short SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
         {
+            auto result = this->PreSolveCheck(mat, x, rhs);
+            if (result != LMS_OK)
+            {
+                return result;
+            }
+            // 追加 SOR 特有参数（含松弛因子 omega）范围检查
             return Check({
-                {[&]() -> bool
-                 {
-                     return (!mat.IsValid()) ||
-                            (mat.ColSize() == 0);
-                 },
-                 LMS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return (x.size() < mat.ColSize()) ||
-                            (rhs.size() < mat.ColSize());
-                 },
-                 LMS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     for (size_t i = 0; i < mat.ColSize(); ++i)
-                     {
-                         if (std::isnan(x[i]) || std::isinf(x[i]) ||
-                             std::isnan(rhs[i]) || std::isinf(rhs[i]))
-                         {
-                             return true;
-                         }
-                     }
-                     return false;
-                 },
-                 LMS_NAN_ELEM_ERR},
-                {[&]() -> bool
-                 {
-                     return mat.RowSize() < mat.ColSize();
-                 },
-                 LMS_SPARSE_ROW_NOT_FULL},
                 {[&]() -> bool
                  {
                      return ((this->maxIter_ < MIN_ITER) ||
@@ -794,26 +882,6 @@ namespace LMS
                              ((this->tol_ <= 0) || (this->tol_ > static_cast<T>(MAX_SET_TOL))));
                  },
                  LMS_SOLVE_SET_ERR},
-            });
-        }
-
-        /**
-         * @brief 迭代过程中的发散检查
-         * @param res 当前残差
-         * @param res0 初始残差
-         * @param eps 判零阈值
-         * @return LMS_OK 正常；LMS_DIVERGED 发散
-         */
-        unsigned short DivergenceCheck(T res, T res0, T eps) const
-        {
-            return Check({
-                {[&]() -> bool
-                 {
-                     return std::isnan(res) || std::isinf(res) ||
-                            (res > static_cast<T>(MAX_OVERLIMIT_TOL)) ||
-                            ((res0 > eps) && (res > 1000 * res0));
-                 },
-                 LMS_DIVERGED},
             });
         }
 
@@ -839,8 +907,8 @@ namespace LMS
             const size_t checkEvery = 10;
 
             // 归一化残差 / 初始残差
-            T bNorm = ComputeUniformResidual(mat, rhs);
-            T res0 = ComputeResidual(mat, x, rhs);
+            T bNorm = this->ComputeUniformResidual(mat, rhs);
+            T res0 = this->ComputeResidual(mat, x, rhs);
 
             for (size_t it = 0; it < maxIter_; it++)
             {
@@ -861,10 +929,10 @@ namespace LMS
 
                 if ((it + 1) % checkEvery == 0)
                 {
-                    T res = ComputeResidual(mat, x, rhs);
+                    T res = this->ComputeResidual(mat, x, rhs);
                     this->finalRes_ = res;
                     this->iterCnt_ = it + 1;
-                    auto err = DivergenceCheck(res, res0, eps);
+                    auto err = this->DivergenceCheck(res, res0, eps);
                     if (err != LMS_OK)
                     {
                         return err;
@@ -906,8 +974,8 @@ namespace LMS
             this->converged_ = false;
             const size_t checkEvery = 10;
             // 归一化残差 / 初始残差
-            T bNorm = ComputeUniformResidual(mat, rhs);
-            T res0 = ComputeResidual(mat, x, rhs);
+            T bNorm = this->ComputeUniformResidual(mat, rhs);
+            T res0 = this->ComputeResidual(mat, x, rhs);
 
             for (size_t it = 0; it < maxIter_; it++)
             {
@@ -946,10 +1014,10 @@ namespace LMS
 
                 if ((it + 1) % checkEvery == 0)
                 {
-                    T res = ComputeResidual(mat, x, rhs);
+                    T res = this->ComputeResidual(mat, x, rhs);
                     this->finalRes_ = res;
                     this->iterCnt_ = it + 1;
-                    auto err = DivergenceCheck(res, res0, eps);
+                    auto err = this->DivergenceCheck(res, res0, eps);
                     if (err != LMS_OK)
                     {
                         return err;
@@ -964,49 +1032,6 @@ namespace LMS
                 }
             }
             return LMS_NOT_CONVERGED;
-        }
-
-        /**
-         * @brief 计算右端项均匀范数 ||b||₂（归一化残差的分母）
-         * @param mat 系数矩阵（用于取列数，保证与残差口径一致）
-         * @param rhs 右端项
-         * @return ||b||₂ = sqrt(Σ_{i<ColSize} rhs[i]²)
-         */
-        T ComputeUniformResidual(const SparseMatrix<T> &mat, const Vec &rhs) const
-        {
-            T res = T{};
-            for (size_t i = 0; i < mat.ColSize(); i++)
-            {
-                res += rhs[i] * rhs[i];
-            }
-            return std::sqrt(res);
-        }
-
-        /**
-         * @brief 计算当前解的绝对残差 L2 范数 ||Ax - b||₂
-         * @param x 解向量
-         * @return 残差 L2 范数
-         * @note 调用前需保证矩阵已装满（rowSize == colSize），
-         *       否则 rowPtr_ 越界（内部函数，由调用方保证）
-         */
-        T ComputeResidual(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
-        {
-            const auto &value = mat.Values();
-            const auto &colIdx = mat.ColIdx();
-            const auto &rowPtr = mat.RowPtr();
-            T res = T{};
-            for (size_t i = 0; i < mat.ColSize(); i++)
-            {
-                size_t startPos = rowPtr[i];
-                size_t endPos = rowPtr[i + 1];
-                T rhs_i = rhs[i];
-                for (size_t j = startPos; j < endPos; j++)
-                {
-                    rhs_i -= value[j] * x[colIdx[j]];
-                }
-                res += rhs_i * rhs_i;
-            }
-            return std::sqrt(res);
         }
 
         /// @return true=染色成功（二分图）；false=含奇环，非二分图（调用方退化为串行）
@@ -1085,6 +1110,255 @@ namespace LMS
         std::vector<size_t> redList_;      // 红点列表
         std::vector<size_t> blackList_;    // 黑点列表
         size_t coloredRevision_;           // 已染色的矩阵结构版本号
+    };
+
+    // ====================== Jacobi求解器实现 ======================
+    template <typename T>
+    class JacobiSolver : public LinearSolverBase<T>
+    {
+        using Arr = T *;
+        using Vec = std::vector<T>;
+        using Mat = std::vector<std::vector<T>>;
+
+    public:
+        JacobiSolver(size_t maxIter, T tol = static_cast<T>(DEFAULT_TOL))
+            : maxIter_(maxIter), tol_(tol)
+        {
+        }
+
+        ~JacobiSolver() = default;
+
+        unsigned short Solve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs) override
+        {
+
+            auto result = SolverParaCheck(mat, x, rhs);
+            if (result != LMS_OK)
+            {
+                return result;
+            }
+
+#ifdef _OPENMP
+            maxThread_ = static_cast<unsigned short>(omp_get_max_threads());
+#endif
+            switch (this->mode_)
+            {
+            case LMS_SERIAL_MODE:
+            {
+                result = SerialSolve(mat, x, rhs);
+                break;
+            }
+            case LMS_MULTI_PROCESS_MODE:
+            {
+                result = MultiProcSolve(mat, x, rhs);
+                break;
+            }
+            case LMS_AUTO_MODE:
+            {
+                if ((maxThread_ == 1) || (mat.ColSize() / maxThread_ < 1000))
+                {
+                    result = SerialSolve(mat, x, rhs);
+                }
+                else
+                {
+                    result = MultiProcSolve(mat, x, rhs);
+                }
+                break;
+            }
+            default:
+            {
+                result = static_cast<decltype(result)>(LMS_MODE_ERR);
+            }
+            }
+
+            return result;
+        }
+
+        LightMatrixSolverType GetSolverType() const
+        {
+            return LMS_JACOBI_SOLVER;
+        }
+
+        void SetJacobiSolverPara(size_t maxIter, T tol = static_cast<T>(DEFAULT_TOL))
+        {
+            maxIter_ = maxIter;
+            tol_ = tol;
+        }
+
+    private:
+        unsigned short SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
+        {
+            auto result = this->PreSolveCheck(mat, x, rhs);
+            if (result != LMS_OK)
+            {
+                return result;
+            }
+            // 追加 Jacobi 参数范围检查
+            return Check({
+                {[&]() -> bool
+                 {
+                     return ((this->maxIter_ < MIN_ITER) ||
+                             (this->maxIter_ > MAX_ITER) ||
+                             (this->tol_ <= 0) || (this->tol_ > static_cast<T>(MAX_SET_TOL)));
+                 },
+                 LMS_SOLVE_SET_ERR},
+            });
+        }
+
+        /**
+         * @brief 串行 Jacobi 迭代
+         * @param x 解向量（原地更新）
+         * @param mat 系数矩阵
+         * @param bNorm 均匀残差 ||b||₂
+         * @param res0 初始残差
+         * @return 收敛/发散/未收敛错误码
+         */
+        unsigned short SerialSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs)
+        {
+            const auto &value = mat.Values();
+            const auto &colIdx = mat.ColIdx();
+            const auto &rowPtr = mat.RowPtr();
+            const auto &diagIdx = mat.DiagIdx();
+            const size_t n = mat.ColSize();
+            const T eps = mat.Eps();
+
+            this->iterCnt_ = 0;
+            this->converged_ = false;
+            const size_t checkEvery = 10;
+
+            // 归一化残差 / 初始残差
+            T bNorm = this->ComputeUniformResidual(mat, rhs);
+            T res0 = this->ComputeResidual(mat, x, rhs);
+
+            for (size_t it = 0; it < maxIter_; it++)
+            {
+                Vec newX(n); // 新解暂存（避免每轮拷贝 rhs）
+                for (size_t i = 0; i < n; i++)
+                {
+                    size_t start = rowPtr[i];
+                    size_t end = rowPtr[i + 1];
+                    T sum = rhs[i]; // 局部标量累加
+                    for (size_t j = start; j < end; j++)
+                    {
+                        if (colIdx[j] != i)
+                        {
+                            sum -= value[j] * x[colIdx[j]];
+                        }
+                    }
+                    newX[i] = sum;
+                }
+
+                for (size_t i = 0; i < n; i++)
+                {
+                    x[i] = newX[i] / value[diagIdx[i]];
+                }
+
+                if ((it + 1) % checkEvery == 0)
+                {
+                    T res = this->ComputeResidual(mat, x, rhs);
+                    this->finalRes_ = res;
+                    this->iterCnt_ = it + 1;
+                    auto err = this->DivergenceCheck(res, res0, eps);
+                    if (err != LMS_OK)
+                    {
+                        return err;
+                    }
+                    // 归一化残差收敛判断
+                    T resNorm = IsZeroElem(bNorm, eps) ? res : (res / bNorm);
+                    if (resNorm < tol_)
+                    {
+                        this->converged_ = true;
+                        return LMS_OK;
+                    }
+                }
+            }
+            return LMS_NOT_CONVERGED;
+        }
+
+        /**
+         * @brief 并行 Jacobi 迭代
+         * @param x 解向量（原地更新）
+         * @param mat 系数矩阵
+         * @param bNorm 均匀残差 ||b||₂
+         * @param res0 初始残差
+         * @return 收敛/发散/未收敛错误码
+         */
+        unsigned short MultiProcSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs)
+        {
+            if (maxThread_ == 1)
+            {
+                return SerialSolve(mat, x, rhs); // 单线程退化串行
+            }
+
+            const auto &value = mat.Values();
+            const auto &colIdx = mat.ColIdx();
+            const auto &rowPtr = mat.RowPtr();
+            const auto &diagIdx = mat.DiagIdx();
+            const size_t n = mat.ColSize();
+            const T eps = mat.Eps();
+
+            this->iterCnt_ = 0;
+            this->converged_ = false;
+            const size_t checkEvery = 10;
+            // 归一化残差 / 初始残差
+            T bNorm = this->ComputeUniformResidual(mat, rhs);
+            T res0 = this->ComputeResidual(mat, x, rhs);
+
+            for (size_t it = 0; it < maxIter_; it++)
+            {
+                Vec tmpRhs(n); // 新解暂存（避免每轮拷贝 rhs）
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+                for (size_t i = 0; i < n; i++)
+                {
+                    size_t start = rowPtr[i];
+                    size_t end = rowPtr[i + 1];
+                    T sum = rhs[i]; // 局部标量累加
+                    for (size_t j = start; j < end; j++)
+                    {
+                        if (colIdx[j] != i)
+                        {
+                            sum -= value[j] * x[colIdx[j]];
+                        }
+                    }
+                    tmpRhs[i] = sum;
+                }
+#ifdef _OPENMP
+#pragma omp parallel for simd schedule(static)
+#endif
+                for (size_t i = 0; i < n; i++)
+                {
+                    x[i] = tmpRhs[i] / value[diagIdx[i]];
+                }
+
+                if ((it + 1) % checkEvery == 0)
+                {
+                    T res = this->ComputeResidual(mat, x, rhs);
+                    this->finalRes_ = res;
+                    this->iterCnt_ = it + 1;
+                    auto err = this->DivergenceCheck(res, res0, eps);
+                    if (err != LMS_OK)
+                    {
+                        return err;
+                    }
+                    // 归一化残差收敛判断
+                    T resNorm = IsZeroElem(bNorm, eps) ? res : (res / bNorm);
+                    if (resNorm < tol_)
+                    {
+                        this->converged_ = true;
+                        return LMS_OK;
+                    }
+                }
+            }
+            return LMS_NOT_CONVERGED;
+        }
+
+    private:
+        size_t maxIter_; // 最大迭代次数
+        T tol_;          // 收敛容差
+
+        // 并行Jacobi相关参数
+        unsigned short maxThread_ = {1}; // 最大线程数
     };
 }
 
