@@ -15,8 +15,8 @@ constexpr size_t num = 100;
 int main()
 {
     using namespace LSS;
-    // mtx - 构造稀疏矩阵
-    SparseMatrix<float> mtx;
+    // mat - 构造稀疏矩阵
+    SparseMatrix<float> mat;
     size_t row = 0;
     // x - 待求解量
     std::vector<float> x(num, {});
@@ -24,7 +24,7 @@ int main()
     std::vector<float> rhs(num, 10);
 
     // 设置矩阵尺寸
-    mtx.Reset(num);
+    mat.Reset(num);
     // AddMtx - 逐行添加向量
     for (size_t i = 0; i < num; ++i)
     {
@@ -40,12 +40,12 @@ int main()
             row_vec[i - 1] = 1;
             row_vec[i] += row_vec[i - 1];
         }
-        mtx.AddRow(row_vec);
+        mat.AddRow(row_vec);
     }
 
     // SORSolver - SOR 求解（解耦架构）
     SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
-    auto result = solver.Solve(mtx, x, rhs);
+    auto result = solver.Solve(mat, x, rhs);
     if (result != LSS_OK)
     {
         cout << "calculate err, errcode: " << result << endl;

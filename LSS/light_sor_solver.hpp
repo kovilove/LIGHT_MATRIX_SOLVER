@@ -374,19 +374,19 @@ namespace LSS
 
         /**
          * @brief 追加批量行（等价于连续调用 AddRow，保留已有行）
-         * @param mtx 待追加的稠密行数组（行向量数组）
+         * @param mat 待追加的稠密行数组（行向量数组）
          * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
          * @return 同 AddRow
          * @note 与 AddMtx 的区别：AddMtx 会先清空矩阵再整体重建（覆盖语义），
          *       本函数在现有行之后继续追加；任一行失败时矩阵被 ClearMtx
          *       （保留尺寸与右端项，可修正后重试）
          */
-        unsigned short AddMultiRow(const Mtx &mtx, size_t &errRow)
+        unsigned short AddMultiRow(const Mtx &mat, size_t &errRow)
         {
             unsigned short result = LSS_OK;
-            for (size_t i = 0; i < mtx.size(); i++)
+            for (size_t i = 0; i < mat.size(); i++)
             {
-                result = AddRow(mtx[i]);
+                result = AddRow(mat[i]);
                 if (result != LSS_OK)
                 {
                     errRow = i;
@@ -399,24 +399,24 @@ namespace LSS
 
         /**
          * @brief 覆盖式批量组装矩阵（先清空现有行，再整体添加）
-         * @param mtx 稠密矩阵（行向量数组），行数不能少于 colSize（超出的行按满行报错）
+         * @param mat 稠密矩阵（行向量数组），行数不能少于 colSize（超出的行按满行报错）
          * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
          * @return LSS_MTX_SIZE_ERR 行数不足 colSize；其余同 AddRow
          * @note 开头先 ClearMtx 清空已有行（保留尺寸与右端项）；
          *       任一行失败时矩阵被 ClearMtx（保留尺寸与右端项，可修正后重试）
          */
-        unsigned short AddMtx(const Mtx &mtx, size_t &errRow)
+        unsigned short AddMtx(const Mtx &mat, size_t &errRow)
         {
             ClearMtx();
             // 检查是否能添加满
-            if (mtx.size() < colSize_)
+            if (mat.size() < colSize_)
             {
                 return LSS_MTX_SIZE_ERR;
             }
             unsigned short result = LSS_OK;
-            for (size_t i = 0; i < mtx.size(); i++)
+            for (size_t i = 0; i < mat.size(); i++)
             {
-                result = AddRow(mtx[i]);
+                result = AddRow(mat[i]);
                 if (result != LSS_OK)
                 {
                     errRow = i;
@@ -595,7 +595,6 @@ namespace LSS
             : maxIter_(maxIter), omega_(omega), tol_(tol), mode_(mode),
               finalRes_(T{}), iterCnt_(0), converged_(false)
         {
-            // 红黑染色并行将在后续版本启用，当前统一串行
         }
 
         /**
@@ -624,9 +623,29 @@ namespace LSS
             // 归一化残差 / 初始残差
             T bNorm = ComputeUniformResidual(rhs);
             T res0 = ComputeResidual(mat, x, rhs);
+#ifdef _OPENMP
+            maxThread_ = omp_get_threads_num();
+#endif
+            if (mode_ == SOR_SERIAL_MODE)
+            {
+                result = SerialSolve(mat, x, rhs, bNorm, res0);
+            }
+            else if (mode_ == SOR_MULTI_PROCESS_MODE)
+            {
+                result = MultiProcSolve(mat, x, rhs, bNorm, res0);
+            }
+            else if (mode_ == SOR_AUTO_MODE)
+            {
+                if ((maxThread_ == 1) || (mat.ColSize() / maxThread_ < 1000))
+                {
+                    result = SerialSolve(mat, x, rhs, bNorm, res0);
+                }
+                else
+                {
+                    result = MultiProcSolve(mat, x, rhs, bNorm, res0);
+                }
+            }
 
-            // 当前版本统一串行；红黑染色并行（mode_）将在后续版本启用
-            result = SolveSerial(mat, x, rhs, bNorm, res0);
             return result;
         }
 
@@ -645,6 +664,21 @@ namespace LSS
             return converged_;
         }
 
+        bool SetCalcProcessMode(unsigned short mode)
+        {
+            if (mode > static_cast<unsigned short>(SOR_MODE_MAX))
+            {
+                return false;
+            }
+            mode_ = static_cast<CalcProcessMode>(mode);
+            return true;
+        }
+
+        CalcProcessMode GetCalcProcessMode()
+        {
+            return mode_;
+        }
+
     private:
         /**
          * @brief 求解前参数与状态校验
@@ -652,7 +686,8 @@ namespace LSS
          * @param mat 系数矩阵与右端项
          * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
-        unsigned short SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
+        unsigned short
+        SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
         {
             return Check({
                 {[&]() -> bool
@@ -725,7 +760,8 @@ namespace LSS
          * @param res0 初始残差
          * @return 收敛/发散/未收敛错误码
          */
-        unsigned short SolveSerial(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs, T bNorm, T res0)
+        unsigned short SerialSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs,
+                                   T bNorm, T res0)
         {
             const auto &value = mat.Values();
             const auto &colIdx = mat.ColIdx();
@@ -740,6 +776,70 @@ namespace LSS
 
             for (size_t it = 0; it < maxIter_; it++)
             {
+                for (size_t i = 0; i < n; i++)
+                {
+                    size_t start = rowPtr[i];
+                    size_t end = rowPtr[i + 1];
+                    T sum = rhs[i];
+                    for (size_t j = start; j < end; j++)
+                    {
+                        if (colIdx[j] != i)
+                        {
+                            sum -= value[j] * x[colIdx[j]];
+                        }
+                    }
+                    x[i] = (1 - omega_) * x[i] + omega_ * sum / value[diagIdx[i]];
+                }
+
+                if ((it + 1) % checkEvery == 0)
+                {
+                    T res = ComputeResidual(mat, x, rhs);
+                    finalRes_ = res;
+                    iterCnt_ = it + 1;
+                    auto err = DivergenceCheck(res, res0, bNorm, eps);
+                    if (err != LSS_OK)
+                    {
+                        return err;
+                    }
+                    // 归一化残差收敛判断
+                    T resNorm = IsZeroElem(bNorm, eps) ? res : (res / bNorm);
+                    if (resNorm < tol_)
+                    {
+                        converged_ = true;
+                        return LSS_OK;
+                    }
+                }
+            }
+            return LSS_NOT_CONVERGED;
+        }
+
+        /**
+         * @brief 并行 SOR 迭代
+         * @param x 解向量（原地更新）
+         * @param mat 系数矩阵与右端项
+         * @param bNorm 均匀残差 ||b||₂
+         * @param res0 初始残差
+         * @return 收敛/发散/未收敛错误码
+         */
+        unsigned short MultiProcSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs,
+                                      T bNorm, T res0)
+        {
+            const auto &value = mat.Values();
+            const auto &colIdx = mat.ColIdx();
+            const auto &rowPtr = mat.RowPtr();
+            const auto &diagIdx = mat.DiagIdx();
+            const size_t n = mat.ColSize();
+            const T eps = mat.Eps();
+
+            iterCnt_ = 0;
+            converged_ = false;
+            const size_t checkEvery = 10;
+
+            for (size_t it = 0; it < maxIter_; it++)
+            {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (size_t i = 0; i < n; i++)
                 {
                     size_t start = rowPtr[i];
@@ -819,14 +919,14 @@ namespace LSS
         }
 
     private:
-        size_t maxIter_;       // 最大迭代次数
-        T omega_;              // 松弛因子
-        T tol_;                // 收敛容差
-        CalcProcessMode mode_; // 计算模式（预留：红黑并行将在后续版本启用）
-
-        T finalRes_;     // 最终残差
-        size_t iterCnt_; // 实际迭代次数
-        bool converged_; // 是否收敛
+        size_t maxIter_;                 // 最大迭代次数
+        T omega_;                        // 松弛因子
+        T tol_;                          // 收敛容差
+        CalcProcessMode mode_;           // 计算模式（预留：红黑并行将在后续版本启用）
+        unsigned short maxThread_ = {1}; // 最大线程数
+        T finalRes_;                     // 最终残差
+        size_t iterCnt_;                 // 实际迭代次数
+        bool converged_;                 // 是否收敛
     };
 }
 

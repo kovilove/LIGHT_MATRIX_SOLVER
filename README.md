@@ -39,26 +39,26 @@ using namespace LSS;
 
 int main()
 {
-    SparseMatrix<double> mtx;
+    SparseMatrix<double> mat;
 
     // 1. 设置矩阵尺寸（方阵，> 2）
-    mtx.Reset(3);
+    mat.Reset(3);
 
     // 2. 组装矩阵（对角元必须非零）
     size_t errRow = 0;
-    mtx.AddMtx({
+    mat.AddMtx({
         {4.0, 1.0, 0.0},
         {1.0, 3.0, 1.0},
         {0.0, 1.0, 4.0},
     }, errRow);
 
     // 3. 设置右端项 b
-    mtx.SetRhs({1.0, 2.0, 3.0});
+    mat.SetRhs({1.0, 2.0, 3.0});
 
     // 4. SOR 求解 Ax = b（w = 1.2，最多 100 次迭代）
     std::vector<double> x(3, 0.0);
     SORSolver<double> solver(100, 1.2);              // 构造求解器（数据与算法解耦）
-    unsigned short ret = solver.Solve(x, mtx);       // 传入矩阵求解
+    unsigned short ret = solver.Solve(x, mat);       // 传入矩阵求解
 
     if (ret == LSS_OK)
     {
@@ -85,8 +85,8 @@ g++ -std=c++17 -O2 -fopenmp example/demo3.cpp -o demo3
 | `ClearMtx()` | 仅清空矩阵系数（保留尺寸与右端项，可重新填充） |
 | `ClearRhs()` | 右端项清零（保留矩阵结构） |
 | `AddRow(vec)` | 添加一行（稠密输入，内部压缩为 CSR） |
-| `AddMultiRow(mtx, errRow)` | 批量追加；失败时 `errRow` 定位出错行 |
-| `AddMtx(mtx, errRow)` | 覆盖式批量组装；带尺寸预检 |
+| `AddMultiRow(mat, errRow)` | 批量追加；失败时 `errRow` 定位出错行 |
+| `AddMtx(mat, errRow)` | 覆盖式批量组装；带尺寸预检 |
 | `AddRhs(vec)` / `AddRhs(val)` | 累加右端项：`rhs += vec` / `rhs[i] += val` |
 | `SetRhs(vec)` / `SetRhs(val)` | 覆盖右端项：`rhs = vec` / `rhs[i] = val` |
 | `IsValid()` / `IsFullMatrix()` | 查询初始化状态 / 是否已装满可求解 |

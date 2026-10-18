@@ -21,8 +21,8 @@ constexpr size_t num = 10000;
 int main()
 {
     using namespace LSS;
-    // mtx - 构造稀疏矩阵（数据容器）
-    SparseMatrix<float> mtx;
+    // mat - 构造稀疏矩阵（数据容器）
+    SparseMatrix<float> mat;
 
     // x - 待求解量
     std::vector<float> x(num, {});
@@ -33,7 +33,7 @@ int main()
     rhs[num - 1] = 20; // 增加非均匀性
 
     // 设置矩阵尺寸（必须先 Reset，再 SetRhs）
-    mtx.Reset(num);
+    mat.Reset(num);
 
     // 逐行组装矩阵（OpenMP 并行加速填充，不影响求解算法）
 #ifdef _OPENMP
@@ -55,14 +55,14 @@ int main()
         }
 #pragma omp ordered
         {
-            mtx.AddRow(row_vec);
+            mat.AddRow(row_vec);
         }
     }
 
     // SORSolver - 解耦后求解（当前串行 SOR）
     SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = solver.Solve(mtx, x, rhs);
+    auto result = solver.Solve(mat, x, rhs);
     auto t1 = std::chrono::high_resolution_clock::now();
 
     if (result != LSS_OK)
