@@ -590,10 +590,8 @@ namespace LSS
         using Mtx = std::vector<std::vector<T>>;
 
     public:
-        SORSolver(size_t maxIter, T omega, T tol = static_cast<T>(DEFAULT_TOL),
-                  CalcProcessMode mode = SOR_AUTO_MODE)
-            : maxIter_(maxIter), omega_(omega), tol_(tol), mode_(mode),
-              finalRes_(T{}), iterCnt_(0), converged_(false)
+        SORSolver(size_t maxIter, T omega, T tol = static_cast<T>(DEFAULT_TOL))
+            : maxIter_(maxIter), omega_(omega), tol_(tol)
         {
         }
 
@@ -624,7 +622,7 @@ namespace LSS
             T bNorm = ComputeUniformResidual(rhs);
             T res0 = ComputeResidual(mat, x, rhs);
 #ifdef _OPENMP
-            maxThread_ = omp_get_threads_num();
+            maxThread_ = static_cast<unsigned short>(omp_get_max_threads());
 #endif
             if (mode_ == SOR_SERIAL_MODE)
             {
@@ -666,11 +664,21 @@ namespace LSS
 
         bool SetCalcProcessMode(unsigned short mode)
         {
-            if (mode > static_cast<unsigned short>(SOR_MODE_MAX))
+            if (mode >= static_cast<unsigned short>(SOR_MODE_MAX))
             {
                 return false;
             }
             mode_ = static_cast<CalcProcessMode>(mode);
+            return true;
+        }
+
+        bool SetCalcProcessMode(CalcProcessMode mode)
+        {
+            if (mode >= SOR_MODE_MAX)
+            {
+                return false;
+            }
+            mode_ = mode;
             return true;
         }
 
@@ -824,6 +832,11 @@ namespace LSS
         unsigned short MultiProcSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs,
                                       T bNorm, T res0)
         {
+            if (!BuildRedBlackColoring(mat))
+            {
+                return SerialSolve(mat, x, rhs, bNorm, res0); // 非二分图退化串行
+            }
+
             const auto &value = mat.Values();
             const auto &colIdx = mat.ColIdx();
             const auto &rowPtr = mat.RowPtr();
@@ -840,19 +853,34 @@ namespace LSS
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-                for (size_t i = 0; i < n; i++)
+                for (size_t i = 0; i < redList_.size(); i++)
                 {
-                    size_t start = rowPtr[i];
-                    size_t end = rowPtr[i + 1];
-                    T sum = rhs[i];
-                    for (size_t j = start; j < end; j++)
+                    size_t j = redList_[i];
+                    T sum = rhs[j];
+                    for (size_t k = rowPtr[j]; k < rowPtr[j + 1]; k++)
                     {
-                        if (colIdx[j] != i)
+                        if (colIdx[k] != j)
                         {
-                            sum -= value[j] * x[colIdx[j]];
+                            sum -= value[k] * x[colIdx[k]];
                         }
                     }
-                    x[i] = (1 - omega_) * x[i] + omega_ * sum / value[diagIdx[i]];
+                    x[j] = (1 - omega_) * x[j] + omega_ * sum / value[diagIdx[j]];
+                }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+                for (size_t i = 0; i < blackList_.size(); i++)
+                {
+                    size_t j = blackList_[i];
+                    T sum = rhs[j];
+                    for (size_t k = rowPtr[j]; k < rowPtr[j + 1]; k++)
+                    {
+                        if (colIdx[k] != j)
+                        {
+                            sum -= value[k] * x[colIdx[k]];
+                        }
+                    }
+                    x[j] = (1 - omega_) * x[j] + omega_ * sum / value[diagIdx[j]];
                 }
 
                 if ((it + 1) % checkEvery == 0)
@@ -918,15 +946,86 @@ namespace LSS
             return std::sqrt(res);
         }
 
+        /// @return true=染色成功（二分图）；false=含奇环，非二分图（调用方退化为串行）
+        bool BuildRedBlackColoring(const SparseMatrix<T> &mat)
+        {
+            if ((mat.StructureRevision() == coloredRevision_) &&
+                (color_.size() == mat.ColSize()))
+            {
+                return true; // 结构没变，复用缓存染色
+            }
+
+            const size_t n = mat.ColSize();
+            const auto &rowPtr = mat.RowPtr();
+            const auto &colIdx = mat.ColIdx();
+
+            std::vector<unsigned char> state(n, 0); // 0=未染, 1=红, 2=黑
+            std::vector<size_t> queue;
+            for (size_t s = 0; s < n; s++)
+            {
+                if (state[s])
+                {
+                    continue;
+                }
+                state[s] = 1; // 新连通分量起点染红
+                queue.clear();
+                queue.push_back(s);
+                size_t head = 0;
+                while (head < queue.size())
+                {
+                    size_t u = queue[head++];
+                    unsigned char c = state[u];
+                    // 取出 u 位置 rowPtr
+                    for (size_t j = rowPtr[u]; j < rowPtr[u + 1]; ++j)
+                    {
+                        size_t v = colIdx[j];
+                        if (v == u || v >= n)
+                        {
+                            // 对角元素不依赖自身
+                            continue;
+                        }
+                        // 未被染色则进行染色并加入队列中寻找依赖
+                        if (!state[v])
+                        {
+                            state[v] = (c == 1) ? 2 : 1;
+                            queue.push_back(v);
+                        }
+                        // 已染色且相邻同色 → 奇环，非二分图
+                        else if (state[v] == c)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            redList_.clear();
+            blackList_.clear();
+            // 根据染色结果加入红黑列表中
+            for (size_t i = 0; i < n; ++i)
+            {
+                (state[i] == 1 ? redList_ : blackList_).push_back(i);
+            }
+            color_ = std::move(state);
+            coloredRevision_ = mat.StructureRevision();
+            return true;
+        }
+
     private:
-        size_t maxIter_;                 // 最大迭代次数
-        T omega_;                        // 松弛因子
-        T tol_;                          // 收敛容差
-        CalcProcessMode mode_;           // 计算模式（预留：红黑并行将在后续版本启用）
-        unsigned short maxThread_ = {1}; // 最大线程数
-        T finalRes_;                     // 最终残差
-        size_t iterCnt_;                 // 实际迭代次数
-        bool converged_;                 // 是否收敛
+        size_t maxIter_; // 最大迭代次数
+        T omega_;        // 松弛因子
+        T tol_;          // 收敛容差
+
+        T finalRes_ = T{};         // 最终残差
+        size_t iterCnt_ = {0};     // 实际迭代次数
+        bool converged_ = {false}; // 是否收敛
+
+        // 并行SOR相关变量
+        CalcProcessMode mode_ = {SOR_SERIAL_MODE}; // 计算模式
+        unsigned short maxThread_ = {1};           // 最大线程数
+        std::vector<unsigned char> color_;         // 染色结果：1=红，2=黑
+        std::vector<size_t> redList_;              // 红点列表
+        std::vector<size_t> blackList_;            // 黑点列表
+        size_t coloredRevision_;                   // 已染色的矩阵结构版本号
     };
 }
 

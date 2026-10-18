@@ -16,7 +16,7 @@
 using std::cout;
 using std::endl;
 
-constexpr size_t num = 10000;
+constexpr size_t num = 50000;
 
 int main()
 {
@@ -25,7 +25,8 @@ int main()
     SparseMatrix<float> mat;
 
     // x - 待求解量
-    std::vector<float> x(num, {});
+    std::vector<float> x1(num, {});
+    std::vector<float> x2(num, {});
 
     // rhs - 右端项
     std::vector<float> rhs(num, 10);
@@ -59,20 +60,58 @@ int main()
         }
     }
 
-    // SORSolver - 解耦后求解（当前串行 SOR）
-    SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
-    auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = solver.Solve(mat, x, rhs);
-    auto t1 = std::chrono::high_resolution_clock::now();
+    // SORSolver
+    SORSolver<float> solver(100, 0.5f, 1e-6f);
 
+    // 当前串行 SOR
+    solver.SetCalcProcessMode(SOR_SERIAL_MODE);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto result = solver.Solve(mat, x1, rhs);
     if (result != LSS_OK)
     {
         cout << "solve err, errcode: " << result << endl;
         return 1;
     }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    // 当前并行 SOR
+    solver.SetCalcProcessMode(SOR_MULTI_PROCESS_MODE);
+    auto t2 = std::chrono::high_resolution_clock::now();
+#ifdef _OPENMP
+    result = solver.Solve(mat, x2, rhs);
+    if (result != LSS_OK)
+    {
+        cout << "solve err, errcode: " << result << endl;
+        return 1;
+    }
+#endif
+    auto t3 = std::chrono::high_resolution_clock::now();
+
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-    std::cout << "Serial SOR time: " << duration.count() << " us"
+    std::cout << "Serial SOR time: " << duration.count() << " ms"
               << ", residual: " << solver.GetResidual()
               << ", iter: " << solver.GetIterCount() << endl;
+
+#ifdef _OPENMP
+    duration = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2);
+    std::cout << "Multiproc SOR time: " << duration.count() << " ms"
+              << ", residual: " << solver.GetResidual()
+              << ", iter: " << solver.GetIterCount() << endl;
+#endif
+
+// 校验结果
+#ifdef _OPENMP
+#pragma omp prarllel for
+    for (size_t i = 0; i < num; i++)
+    {
+        if (x1[i] - x2[i] > 0.0001)
+        {
+#pragma omp critical
+            {
+                std::cout << "i: " << i << " x1:" << x1[i] << " x2:" << x2[i] << std::endl;
+            }
+        }
+    }
+#endif
     return 0;
 }

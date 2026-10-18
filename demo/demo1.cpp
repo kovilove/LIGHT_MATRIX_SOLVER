@@ -43,7 +43,7 @@ int main()
                row);
 
     // SORSolver - SOR 求解（解耦架构：矩阵只管数据，求解器只管算法）
-    SORSolver<float> solver(1000, 0.5f, 1e-6f, SOR_SERIAL_MODE);
+    SORSolver<float> solver(1000, 0.5f, 1e-6f);
     auto t0 = std::chrono::high_resolution_clock::now();
 
     auto result = solver.Solve(mat, x, rhs);

@@ -44,7 +44,7 @@ int main()
     }
 
     // SORSolver - SOR 求解（解耦架构）
-    SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
+    SORSolver<float> solver(100, 0.5f, 1e-6f);
     auto result = solver.Solve(mat, x, rhs);
     if (result != LSS_OK)
     {
