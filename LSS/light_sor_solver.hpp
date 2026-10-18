@@ -5,8 +5,8 @@
  *          CSR（Compressed Sparse Row）稀疏存储，适用于 CFD 等稀疏线性系统。
  *          数据（SparseMatrix）与求解算法（LinearSolverBase / SORSolver）解耦：
  *          矩阵只负责存储与组装，求解器负责迭代算法，支持可插拔扩展（未来可新增 GAMG 等）。
- *          用法：Reset → AddRow/AddMultiRow/AddMtx → SetRhs/AddRhs → SORSolver(...).Solve(x, mat)
- *          重填矩阵：ClearMtx → AddRow/AddMtx（保留尺寸与右端项）
+ *          用法：Reset → AddRow/AddMultiRow/AddMtx
+ *          重填矩阵：ClearMtx → AddRow/AddMtx（保留尺寸）
  */
 #ifndef LIGHT_SOR_SOLVER_H
 #define LIGHT_SOR_SOLVER_H
@@ -186,8 +186,7 @@ namespace LSS
 
             // 初始行数偏移为0
             rowPtr_.push_back(0);
-            // 右端项大小固定
-            rhs_.resize(colSize, T{});
+
             return LSS_OK;
         }
 
@@ -204,13 +203,12 @@ namespace LSS
             colIdx_.clear();
             rowPtr_.clear();
             diagIdx_.clear();
-            rhs_.clear();
             structureRevision_ = 0;
         }
 
         /**
          * @brief 清空矩阵系数内容（保留矩阵尺寸与右端项，可重新填充）
-         * @note 仅清空 CSR 数据并重置行计数，colSize_/isValid_/rhs_ 保留；
+         * @note 仅清空 CSR 数据并重置行计数，colSize_/isValid_ 保留；
          *       清空后可再次 AddRow/AddMtx 重新组装矩阵
          */
         void ClearMtx()
@@ -229,14 +227,6 @@ namespace LSS
             // 初始行数偏移为0
             rowPtr_.push_back(0);
             structureRevision_++; // 结构变化，求解器需重染色
-        }
-
-        /**
-         * @brief 将右端项向量 b 全部清零（保留矩阵结构与尺寸）
-         */
-        void ClearRhs()
-        {
-            rhs_.assign(colSize_, T{});
         }
 
         /**
@@ -282,15 +272,6 @@ namespace LSS
         size_t NotZeroElemNum() const
         {
             return value_.size();
-        }
-
-        /**
-         * @brief 获取右端项向量 b（只读）
-         * @return 右端项 const 引用，避免拷贝
-         */
-        const Vec &Rhs() const
-        {
-            return rhs_;
         }
 
         // ====================== CSR 结构只读访问器（供求解器读取） ======================
@@ -364,7 +345,7 @@ namespace LSS
          */
         unsigned short AddRow(const Vec &vec)
         {
-            auto result = AddRowAbnormalCheck(vec);
+            auto result = AddRowByVecAbnormalCheck(vec);
             if (result != LSS_OK)
             {
                 return result;
@@ -447,87 +428,6 @@ namespace LSS
         }
 
         /**
-         * @brief 累加右端项：rhs += vec（用于分步组装 b）
-         * @param vec 待累加向量，长度必须 >= colSize
-         * @return LSS_OK 成功；
-         *         LSS_INI_ERR 未初始化；
-         *         LSS_VEC_LEN_ERR 长度不足；
-         *         LSS_NAN_ELEM_ERR 含 NaN/Inf
-         */
-        unsigned short AddRhs(const Vec &vec)
-        {
-            auto result = AddRowByVecAbnormalCheck(vec);
-            if (result != LSS_OK)
-            {
-                return result;
-            }
-
-            for (size_t i = 0; i < colSize_; ++i)
-            {
-                rhs_[i] += vec[i];
-            }
-            return LSS_OK;
-        }
-
-        /**
-         * @brief 右端项整体累加标量：rhs[i] += val（对所有 i）
-         * @param val 待累加的标量
-         * @return LSS_OK 成功；LSS_INI_ERR 未初始化；LSS_NAN_ELEM_ERR val 为 NaN/Inf
-         */
-        unsigned short AddRhs(T val)
-        {
-            auto result = AddRowByValueAbnormalCheck(val);
-            if (result != LSS_OK)
-            {
-                return result;
-            }
-
-            for (size_t i = 0; i < colSize_; ++i)
-            {
-                rhs_[i] += val;
-            }
-            return LSS_OK;
-        }
-
-        /**
-         * @brief 覆盖右端项：rhs = vec
-         * @param vec 新右端项，长度必须 >= colSize
-         * @return LSS_OK 成功；
-         *         LSS_INI_ERR 未初始化；
-         *         LSS_VEC_LEN_ERR 长度不足；
-         *         LSS_NAN_ELEM_ERR 含 NaN/Inf
-         */
-        unsigned short SetRhs(const Vec &vec)
-        {
-            auto result = SetRhsByVecAbnormalCheck(vec);
-            if (result != LSS_OK)
-            {
-                return result;
-            }
-            // copy vec -> rhs
-            std::copy(vec.begin(), vec.begin() + colSize_, rhs_.begin());
-            return LSS_OK;
-        }
-
-        /**
-         * @brief 右端项整体覆盖为同一标量：rhs[i] = val（对所有 i）
-         * @param val 待赋值的标量
-         * @return LSS_OK 成功；LSS_INI_ERR 未初始化；LSS_NAN_ELEM_ERR val 为 NaN/Inf
-         * @note 与 AddRhs(T) 的区别：本函数是覆盖语义，AddRhs(T) 是累加语义
-         */
-        unsigned short SetRhs(T val)
-        {
-            auto result = SetRhsByValueAbnormalCheck(val);
-            if (result != LSS_OK)
-            {
-                return result;
-            }
-            // copy val -> rhs
-            rhs_.assign(colSize_, val);
-            return LSS_OK;
-        }
-
-        /**
          * @brief 检查矩阵是否严格对角占优（|Aii| > Σ|Aij|，j≠i）
          * @return LSS_DIAG_DOM 严格占优；
          *         LSS_NOT_DIAG_DOM 不占优；
@@ -540,8 +440,7 @@ namespace LSS
             auto result = Check({
                 {[&]() -> bool
                  {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
+                     return (this->colSize_ == 0) || (!this->isValid_);
                  },
                  LSS_INI_ERR},
                 {[&]() -> bool
@@ -578,53 +477,13 @@ namespace LSS
             return LSS_DIAG_DOM;
         }
 
-        /**
-         * @brief 计算均匀残差 L2 范数 ||b||₂
-         * @return 均匀残差 L2 范数
-         */
-        T ComputeUniformResidual() const
-        {
-            T res = T{};
-            for (size_t i = 0; i < colSize_; i++)
-            {
-                res += rhs_[i] * rhs_[i];
-            }
-            return std::sqrt(res);
-        }
-
-        /**
-         * @brief 计算当前解的绝对残差 L2 范数 ||Ax - b||₂
-         * @param x 解向量
-         * @return 残差 L2 范数
-         * @note 调用前需保证矩阵已装满（rowSize == colSize），
-         *       否则 rowPtr_ 越界（内部函数，由调用方保证）
-         */
-        T ComputeResidual(const Vec &x) const
-        {
-            T res = T{};
-            size_t startPos = 0;
-            size_t endPos = 0;
-            for (size_t i = 0; i < colSize_; i++)
-            {
-                startPos = rowPtr_[i];
-                endPos = rowPtr_[i + 1];
-                T rhs_i = rhs_[i];
-                for (size_t j = startPos; j < endPos; j++)
-                {
-                    rhs_i -= value_[j] * x[colIdx_[j]];
-                }
-                res += rhs_i * rhs_i;
-            }
-            return std::sqrt(res);
-        }
-
     private:
         /**
          * @brief 添加矩阵的一行前的异常检查
          * @param vec 待添加的行向量
          * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
-        unsigned short AddRowAbnormalCheck(const Vec &vec)
+        unsigned short AddRowByVecAbnormalCheck(const Vec &vec)
         {
             return Check({
                 {[&]() -> bool
@@ -661,122 +520,12 @@ namespace LSS
                  LSS_NAN_ELEM_ERR},
             });
         }
-        /**
-         * @brief 添加矩阵的一行前的异常检查（仅检查向量长度和 NaN/Inf）
-         * @param vec 待添加的行向量
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
-         * @note 仅用于累加右端项 rhs += vec 的异常检查，矩阵行数不受影响
-         */
-        unsigned short AddRowByVecAbnormalCheck(const Vec &vec)
-        {
-            return Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return vec.size() < this->colSize_;
-                 },
-                 LSS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     for (size_t i = 0; i < this->colSize_; ++i)
-                     {
-                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
-                         {
-                             return true;
-                         }
-                     }
-                     return false;
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
-        }
-        /**
-         * @brief 添加矩阵的一个元素前的异常检查
-         * @param val 待添加的元素值
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
-         */
-        unsigned short AddRowByValueAbnormalCheck(T val)
-        {
-            return Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return std::isnan(val) || std::isinf(val);
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
-        }
-        /**
-         * @brief 设置右端项前的异常检查
-         * @param vec 待设置的右端项向量
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
-         */
-        unsigned short SetRhsByVecAbnormalCheck(const Vec &vec)
-        {
-            return Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return vec.size() < this->colSize_;
-                 },
-                 LSS_VEC_LEN_ERR},
-                {[&]() -> bool
-                 {
-                     for (size_t i = 0; i < this->colSize_; ++i)
-                     {
-                         if (std::isnan(vec[i]) || std::isinf(vec[i]))
-                         {
-                             return true;
-                         }
-                     }
-                     return false;
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
-        }
-        /**
-         * @brief 设置右端项前的异常检查（仅检查 NaN/Inf）
-         * @param val 待设置的右端项标量
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
-         */
-        unsigned short SetRhsByValueAbnormalCheck(T val)
-        {
-            return Check({
-                {[&]() -> bool
-                 {
-                     return (this->colSize_ == 0) || (!this->isValid_) ||
-                            (this->rhs_.size() != this->colSize_);
-                 },
-                 LSS_INI_ERR},
-                {[&]() -> bool
-                 {
-                     return std::isnan(val) || std::isinf(val);
-                 },
-                 LSS_NAN_ELEM_ERR},
-            });
-        }
 
     private:
         std::vector<T> value_;                    // 非零元素值（CSR）
         std::vector<size_t> colIdx_;              // 非零元素列索引（CSR）
         std::vector<size_t> rowPtr_;              // 每行起始偏移（CSR，长度 = 行数+1）
         std::vector<size_t> diagIdx_;             // 每行对角元在 value_ 中的下标
-        std::vector<T> rhs_;                      // 右端项 b
         T eps_ = static_cast<T>(DEFAULT_EPSILON); // 判零阈值
         size_t structureRevision_ = {0};          // 矩阵结构版本号（结构变化时递增）
     };
@@ -803,13 +552,14 @@ namespace LSS
         LinearSolverBase &operator=(LinearSolverBase &&) = delete;
 
         /**
-         * @brief 求解线性方程组 A x = b（A 与 b 由矩阵 mat 提供）
+         * @brief 求解线性方程组 A x = b（A 由矩阵 mat 提供）
+         * @param mat 系数矩阵（数据容器，求解器只读）
          * @param x 输入输出参数：进入时为零初值或上次解（作初值猜测），
          *          退出时为解向量（长度必须 >= mat.ColSize()）
-         * @param mat 系数矩阵与右端项（数据容器，求解器只读）
+         * @param rhs 右端项
          * @return LSS_OK 收敛；其余为错误码（见 ErrCode）
          */
-        virtual unsigned short Solve(Vec &x, const SparseMatrix<T> &mat) = 0;
+        virtual unsigned short Solve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs) = 0;
 
         /// @brief 获取最后一次求解的最终残差（未求解时为 0）
         virtual T GetResidual() const = 0;
@@ -850,10 +600,10 @@ namespace LSS
 
         /**
          * @brief 求解线性方程组 A x = b
+         * @param mat 系数矩阵（数据容器，求解器只读）
          * @param x 输入输出参数：进入时为零初值或上次解（作初值猜测），
          *          退出时为解向量（长度必须 >= mat.ColSize()）
-         * @param mat 系数矩阵与右端项（数据容器，求解器只读）
-         * @return LSS_OK 收敛；
+         * @param rhs 右端项
          *         LSS_INI_ERR 矩阵未初始化；
          *         LSS_VEC_LEN_ERR x长度不足；
          *         LSS_SPARSE_ROW_NOT_FULL 矩阵未填充满至方阵；
@@ -863,20 +613,20 @@ namespace LSS
          *         其余为参数/状态校验错误码
          * @note 每 10 次迭代检测一次残差；收敛或发散时提前返回，x 保留当时结果
          */
-        unsigned short Solve(Vec &x, const SparseMatrix<T> &mat) override
+        unsigned short Solve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs) override
         {
-            auto result = SolverParaCheck(x, mat);
+            auto result = SolverParaCheck(mat, x, rhs);
             if (result != LSS_OK)
             {
                 return result;
             }
 
             // 归一化残差 / 初始残差
-            T bNorm = mat.ComputeUniformResidual();
-            T res0 = mat.ComputeResidual(x);
+            T bNorm = ComputeUniformResidual(rhs);
+            T res0 = ComputeResidual(mat, x, rhs);
 
             // 当前版本统一串行；红黑染色并行（mode_）将在后续版本启用
-            result = SolveSerial(x, mat, bNorm, res0);
+            result = SolveSerial(mat, x, rhs, bNorm, res0);
             return result;
         }
 
@@ -902,21 +652,34 @@ namespace LSS
          * @param mat 系数矩阵与右端项
          * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
-        unsigned short SolverParaCheck(const Vec &x, const SparseMatrix<T> &mat) const
+        unsigned short SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
         {
             return Check({
                 {[&]() -> bool
                  {
                      return (!mat.IsValid()) ||
-                            (mat.ColSize() == 0) ||
-                            (mat.Rhs().size() != mat.ColSize());
+                            (mat.ColSize() == 0);
                  },
                  LSS_INI_ERR},
                 {[&]() -> bool
                  {
-                     return x.size() < mat.ColSize();
+                     return (x.size() < mat.ColSize()) ||
+                            (rhs.size() < mat.ColSize());
                  },
                  LSS_VEC_LEN_ERR},
+                {[&]() -> bool
+                 {
+                     for (size_t i = 0; i < mat.ColSize(); ++i)
+                     {
+                         if (std::isnan(x[i]) || std::isinf(x[i]) ||
+                             std::isnan(rhs[i]) || std::isinf(rhs[i]))
+                         {
+                             return true;
+                         }
+                     }
+                     return false;
+                 },
+                 LSS_NAN_ELEM_ERR},
                 {[&]() -> bool
                  {
                      return mat.RowSize() < mat.ColSize();
@@ -962,13 +725,12 @@ namespace LSS
          * @param res0 初始残差
          * @return 收敛/发散/未收敛错误码
          */
-        unsigned short SolveSerial(Vec &x, const SparseMatrix<T> &mat, T bNorm, T res0)
+        unsigned short SolveSerial(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs, T bNorm, T res0)
         {
             const auto &value = mat.Values();
             const auto &colIdx = mat.ColIdx();
             const auto &rowPtr = mat.RowPtr();
             const auto &diagIdx = mat.DiagIdx();
-            const auto &rhs = mat.Rhs();
             const size_t n = mat.ColSize();
             const T eps = mat.Eps();
 
@@ -995,7 +757,7 @@ namespace LSS
 
                 if ((it + 1) % checkEvery == 0)
                 {
-                    T res = mat.ComputeResidual(x);
+                    T res = ComputeResidual(mat, x, rhs);
                     finalRes_ = res;
                     iterCnt_ = it + 1;
                     auto err = DivergenceCheck(res, res0, bNorm, eps);
@@ -1013,6 +775,47 @@ namespace LSS
                 }
             }
             return LSS_NOT_CONVERGED;
+        }
+
+        /**
+         * @brief 计算均匀残差 L2 范数 ||b||₂
+         * @return 均匀残差 L2 范数
+         */
+        T ComputeUniformResidual(const Vec &rhs) const
+        {
+            T res = T{};
+            for (size_t i = 0; i < rhs.size(); i++)
+            {
+                res += rhs[i] * rhs[i];
+            }
+            return std::sqrt(res);
+        }
+
+        /**
+         * @brief 计算当前解的绝对残差 L2 范数 ||Ax - b||₂
+         * @param x 解向量
+         * @return 残差 L2 范数
+         * @note 调用前需保证矩阵已装满（rowSize == colSize），
+         *       否则 rowPtr_ 越界（内部函数，由调用方保证）
+         */
+        T ComputeResidual(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
+        {
+            const auto &value = mat.Values();
+            const auto &colIdx = mat.ColIdx();
+            const auto &rowPtr = mat.RowPtr();
+            T res = T{};
+            for (size_t i = 0; i < mat.ColSize(); i++)
+            {
+                size_t startPos = rowPtr[i];
+                size_t endPos = rowPtr[i + 1];
+                T rhs_i = rhs[i];
+                for (size_t j = startPos; j < endPos; j++)
+                {
+                    rhs_i -= value[j] * x[colIdx[j]];
+                }
+                res += rhs_i * rhs_i;
+            }
+            return std::sqrt(res);
         }
 
     private:

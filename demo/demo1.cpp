@@ -41,14 +41,12 @@ int main()
                    {1, 5, 0, 0, 0, 0, 0, 0, 0, 5},
                },
                row);
-    // SetRhs - 添加右端项
-    mtx.SetRhs(rhs);
 
     // SORSolver - SOR 求解（解耦架构：矩阵只管数据，求解器只管算法）
     SORSolver<float> solver(1000, 0.5f, 1e-6f, SOR_SERIAL_MODE);
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    auto result = solver.Solve(x, mtx);
+    auto result = solver.Solve(mtx, x, rhs);
     if (result != LSS_OK)
     {
         cout << "calculate err";

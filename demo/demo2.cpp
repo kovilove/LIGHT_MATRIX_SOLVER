@@ -42,12 +42,10 @@ int main()
         }
         mtx.AddRow(row_vec);
     }
-    // SetRhs - 添加右端项
-    mtx.SetRhs(rhs);
 
     // SORSolver - SOR 求解（解耦架构）
     SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
-    auto result = solver.Solve(x, mtx);
+    auto result = solver.Solve(mtx, x, rhs);
     if (result != LSS_OK)
     {
         cout << "calculate err, errcode: " << result << endl;

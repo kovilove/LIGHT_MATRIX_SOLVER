@@ -34,7 +34,6 @@ int main()
 
     // 设置矩阵尺寸（必须先 Reset，再 SetRhs）
     mtx.Reset(num);
-    mtx.SetRhs(rhs);
 
     // 逐行组装矩阵（OpenMP 并行加速填充，不影响求解算法）
 #ifdef _OPENMP
@@ -63,7 +62,7 @@ int main()
     // SORSolver - 解耦后求解（当前串行 SOR）
     SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = solver.Solve(x, mtx);
+    auto result = solver.Solve(mtx, x, rhs);
     auto t1 = std::chrono::high_resolution_clock::now();
 
     if (result != LSS_OK)
