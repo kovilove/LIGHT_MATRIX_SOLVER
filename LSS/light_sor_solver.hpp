@@ -61,12 +61,12 @@ namespace LSS
 
     /**
      * @brief 计算模式枚举
-     * @note  串行模式（默认）/ 并行模式 / 自动模式（保留）
+     * @note  串行模式（默认）/ 并行模式（红黑染色）/ 自动模式（规模与线程足够时并行）
      */
     enum CalcProcessMode : unsigned short
     {
         SOR_SERIAL_MODE = 0,    // 串行模式
-        SOR_MULTI_PROCESS_MODE, // 并行模式（红黑染色 SOR）
+        SOR_MULTI_PROCESS_MODE, // 并行模式（红黑染色 SOR，需 -fopenmp）
         SOR_AUTO_MODE,          // 自动模式（规模足够大且多线程时并行）
         SOR_MODE_MAX,
     };
@@ -145,7 +145,8 @@ namespace LSS
      * @note 非零元素按行压缩存储：value_/colIdx_/rowPtr_ 构成标准 CSR 三元组，
      *       diagIdx_ 记录每行对角元在 value_ 中的下标（求解时 O(1) 访问）
      * @note 求解算法见 LinearSolverBase / SORSolver；矩阵通过只读访问器
-     *       （Values/ColIdx/RowPtr/DiagIdx/Rhs）向求解器暴露内部 CSR 结构。
+     *       （Values/ColIdx/RowPtr/DiagIdx/Eps/StructureRevision）向求解器暴露内部 CSR 结构；
+     *       右端项 b 不存入矩阵，由调用方以 Solve(mat, x, rhs) 参数传入。
      */
     template <typename T>
     class SparseMatrix : public BaseMatrix
@@ -207,7 +208,7 @@ namespace LSS
         }
 
         /**
-         * @brief 清空矩阵系数内容（保留矩阵尺寸与右端项，可重新填充）
+         * @brief 清空矩阵系数内容（保留矩阵尺寸，可重新填充）
          * @note 仅清空 CSR 数据并重置行计数，colSize_/isValid_ 保留；
          *       清空后可再次 AddRow/AddMtx 重新组装矩阵
          */
@@ -379,7 +380,7 @@ namespace LSS
          * @return 同 AddRow
          * @note 与 AddMtx 的区别：AddMtx 会先清空矩阵再整体重建（覆盖语义），
          *       本函数在现有行之后继续追加；任一行失败时矩阵被 ClearMtx
-         *       （保留尺寸与右端项，可修正后重试）
+         *       （保留矩阵尺寸，可修正后重试）
          */
         unsigned short AddMultiRow(const Mtx &mat, size_t &errRow)
         {
@@ -402,7 +403,7 @@ namespace LSS
          * @param mat 稠密矩阵（行向量数组），行数不能少于 colSize（超出的行按满行报错）
          * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
          * @return LSS_MTX_SIZE_ERR 行数不足 colSize；其余同 AddRow
-         * @note 开头先 ClearMtx 清空已有行（保留尺寸与右端项）；
+         * @note 开头先 ClearMtx 清空已有行（保留矩阵尺寸）；
          *       任一行失败时矩阵被 ClearMtx（保留尺寸与右端项，可修正后重试）
          */
         unsigned short AddMtx(const Mtx &mat, size_t &errRow)
@@ -577,10 +578,13 @@ namespace LSS
     /**
      * @brief SOR（逐次超松弛）求解器实现
      * @tparam T 浮点类型（float/double）
-     * @details 当前版本提供串行 SOR 迭代。红黑染色并行（OpenMP）将在后续
-     *          版本加入：通过将未知量按矩阵拓扑二分为红/黑两组消除 GS/SOR
-     *          迭代依赖，一轮迭代拆成两个并行 pass，保留顺序收敛语义。
-     *          构造参数 mode 已为并行扩展预留（当前统一按串行执行）。
+     * @details 提供串行与红黑染色并行两种求解模式，通过 SetCalcProcessMode 切换：
+     *          - SOR_SERIAL_MODE（默认）：经典逐行 Gauss-Seidel/SOR 迭代；
+     *          - SOR_MULTI_PROCESS_MODE：红黑染色并行 SOR（需 -fopenmp）。
+     *            将未知量按矩阵拓扑二分（红/黑），每轮迭代拆成两个并行 pass——
+     *            红点只读黑点旧值、黑点读红点新值，隐式 barrier 同步，保留顺序
+     *            收敛语义；非二分图（含奇环）自动退化为串行。
+     *          - SOR_AUTO_MODE：规模足够大且多线程时自动启用并行，否则走串行。
      */
     template <typename T>
     class SORSolver : public LinearSolverBase<T>
@@ -590,6 +594,13 @@ namespace LSS
         using Mtx = std::vector<std::vector<T>>;
 
     public:
+        /**
+         * @brief 构造 SOR 求解器
+         * @param maxIter 最大迭代次数，合法范围 [MIN_ITER, MAX_ITER]
+         * @param omega 松弛因子（1.0 即 Gauss-Seidel），合法范围 (0, MAX_ALPHAW]
+         * @param tol 收敛容差（基于归一化残差 ||Ax-b||/||b||），合法范围 (0, MAX_SET_TOL]
+         * @note 默认串行模式；并行 / 自动模式通过 SetCalcProcessMode 切换
+         */
         SORSolver(size_t maxIter, T omega, T tol = static_cast<T>(DEFAULT_TOL))
             : maxIter_(maxIter), omega_(omega), tol_(tol)
         {
@@ -608,7 +619,8 @@ namespace LSS
          *         LSS_NOT_CONVERGED 迭代跑满未达标（x 为最后迭代值，不可信）；
          *         LSS_DIVERGED 发散（NaN/Inf 或残差爆炸）；
          *         其余为参数/状态校验错误码
-         * @note 每 10 次迭代检测一次残差；收敛或发散时提前返回，x 保留当时结果
+         * @note 每 10 次迭代检测一次残差；收敛或发散时提前返回，x 保留当时结果；
+         *       计算模式由 SetCalcProcessMode 决定（串行 / 红黑并行 / 自动）
          */
         unsigned short Solve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs) override
         {
@@ -619,7 +631,7 @@ namespace LSS
             }
 
             // 归一化残差 / 初始残差
-            T bNorm = ComputeUniformResidual(rhs);
+            T bNorm = ComputeUniformResidual(mat, rhs);
             T res0 = ComputeResidual(mat, x, rhs);
 #ifdef _OPENMP
             maxThread_ = static_cast<unsigned short>(omp_get_max_threads());
@@ -691,7 +703,7 @@ namespace LSS
         /**
          * @brief 求解前参数与状态校验
          * @param x 解向量
-         * @param mat 系数矩阵与右端项
+         * @param mat 系数矩阵
          * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
         unsigned short
@@ -763,7 +775,7 @@ namespace LSS
         /**
          * @brief 串行 SOR 迭代
          * @param x 解向量（原地更新）
-         * @param mat 系数矩阵与右端项
+         * @param mat 系数矩阵
          * @param bNorm 均匀残差 ||b||₂
          * @param res0 初始残差
          * @return 收敛/发散/未收敛错误码
@@ -824,7 +836,7 @@ namespace LSS
         /**
          * @brief 并行 SOR 迭代
          * @param x 解向量（原地更新）
-         * @param mat 系数矩阵与右端项
+         * @param mat 系数矩阵
          * @param bNorm 均匀残差 ||b||₂
          * @param res0 初始残差
          * @return 收敛/发散/未收敛错误码
@@ -906,13 +918,15 @@ namespace LSS
         }
 
         /**
-         * @brief 计算均匀残差 L2 范数 ||b||₂
-         * @return 均匀残差 L2 范数
+         * @brief 计算右端项均匀范数 ||b||₂（归一化残差的分母）
+         * @param mat 系数矩阵（用于取列数，保证与残差口径一致）
+         * @param rhs 右端项
+         * @return ||b||₂ = sqrt(Σ_{i<ColSize} rhs[i]²)
          */
-        T ComputeUniformResidual(const Vec &rhs) const
+        T ComputeUniformResidual(const SparseMatrix<T> &mat, const Vec &rhs) const
         {
             T res = T{};
-            for (size_t i = 0; i < rhs.size(); i++)
+            for (size_t i = 0; i < mat.ColSize(); i++)
             {
                 res += rhs[i] * rhs[i];
             }
@@ -952,46 +966,41 @@ namespace LSS
             if ((mat.StructureRevision() == coloredRevision_) &&
                 (color_.size() == mat.ColSize()))
             {
-                return true; // 结构没变，复用缓存染色
+                return true; // 结构未变，复用缓存染色
             }
 
             const size_t n = mat.ColSize();
             const auto &rowPtr = mat.RowPtr();
             const auto &colIdx = mat.ColIdx();
 
-            std::vector<unsigned char> state(n, 0); // 0=未染, 1=红, 2=黑
+            std::vector<unsigned char> color(n, 0); // 0未染色，1-红色，2-黑色
             std::vector<size_t> queue;
-            for (size_t s = 0; s < n; s++)
+
+            for (size_t i = 0; i < n; i++)
             {
-                if (state[s])
+                if (color[i])
                 {
                     continue;
                 }
-                state[s] = 1; // 新连通分量起点染红
+                color[i] = 1;
                 queue.clear();
-                queue.push_back(s);
+                queue.push_back(i);
                 size_t head = 0;
                 while (head < queue.size())
                 {
                     size_t u = queue[head++];
-                    unsigned char c = state[u];
-                    // 取出 u 位置 rowPtr
-                    for (size_t j = rowPtr[u]; j < rowPtr[u + 1]; ++j)
+                    for (size_t j = rowPtr[u]; j < rowPtr[u + 1]; j++)
                     {
-                        size_t v = colIdx[j];
-                        if (v == u || v >= n)
+                        if (colIdx[j] == u)
                         {
-                            // 对角元素不依赖自身
                             continue;
                         }
-                        // 未被染色则进行染色并加入队列中寻找依赖
-                        if (!state[v])
+                        if (!color[colIdx[j]])
                         {
-                            state[v] = (c == 1) ? 2 : 1;
-                            queue.push_back(v);
+                            color[colIdx[j]] = (color[u] == 1) ? 2 : 1;
+                            queue.push_back(colIdx[j]);
                         }
-                        // 已染色且相邻同色 → 奇环，非二分图
-                        else if (state[v] == c)
+                        else if (color[colIdx[j]] == color[u])
                         {
                             return false;
                         }
@@ -1000,12 +1009,18 @@ namespace LSS
             }
             redList_.clear();
             blackList_.clear();
-            // 根据染色结果加入红黑列表中
-            for (size_t i = 0; i < n; ++i)
+            for (size_t i = 0; i < n; i++)
             {
-                (state[i] == 1 ? redList_ : blackList_).push_back(i);
+                if (color[i] == 1)
+                {
+                    redList_.push_back(i);
+                }
+                else
+                {
+                    blackList_.push_back(i);
+                }
             }
-            color_ = std::move(state);
+            color_ = std::move(color);
             coloredRevision_ = mat.StructureRevision();
             return true;
         }

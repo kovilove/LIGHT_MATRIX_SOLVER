@@ -101,10 +101,10 @@ int main()
 
 // 校验结果
 #ifdef _OPENMP
-#pragma omp prarllel for
+#pragma omp parallel for
     for (size_t i = 0; i < num; i++)
     {
-        if (x1[i] - x2[i] > 0.0001)
+        if (std::abs(x1[i] - x2[i]) > 0.0001)
         {
 #pragma omp critical
             {
