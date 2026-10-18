@@ -1,13 +1,13 @@
 /**
  * @file demo3.cpp
  * @brief 示例代码
- * @note  10000 × 10000 稀疏矩阵求解，演示解耦架构（SparseMatrix 数据 + SORSolver 算法）
+ * @note  30000 × 30000 稀疏矩阵求解，演示解耦架构（SparseMatrix 数据 + SORSolver 算法）
  *        矩阵组装使用 OpenMP 并行加速；求解当前为串行 SOR（红黑并行将在后续版本加入）
  */
 
 #include <iostream>
 #include <chrono>
-#include "../LSS/light_sor_solver.hpp"
+#include "../LMS/light_matrix_solver.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -16,11 +16,11 @@
 using std::cout;
 using std::endl;
 
-constexpr size_t num = 50000;
+constexpr size_t num = 30000;
 
 int main()
 {
-    using namespace LSS;
+    using namespace LMS;
     // mat - 构造稀疏矩阵（数据容器）
     SparseMatrix<float> mat;
 
@@ -64,10 +64,10 @@ int main()
     SORSolver<float> solver(100, 0.5f, 1e-6f);
 
     // 当前串行 SOR
-    solver.SetCalcProcessMode(SOR_SERIAL_MODE);
+    solver.SetCalcProcessMode(LMS_SERIAL_MODE);
     auto t0 = std::chrono::high_resolution_clock::now();
     auto result = solver.Solve(mat, x1, rhs);
-    if (result != LSS_OK)
+    if (result != LMS_OK)
     {
         cout << "solve err, errcode: " << result << endl;
         return 1;
@@ -75,11 +75,11 @@ int main()
     auto t1 = std::chrono::high_resolution_clock::now();
 
     // 当前并行 SOR
-    solver.SetCalcProcessMode(SOR_MULTI_PROCESS_MODE);
+    solver.SetCalcProcessMode(LMS_MULTI_PROCESS_MODE);
     auto t2 = std::chrono::high_resolution_clock::now();
 #ifdef _OPENMP
     result = solver.Solve(mat, x2, rhs);
-    if (result != LSS_OK)
+    if (result != LMS_OK)
     {
         cout << "solve err, errcode: " << result << endl;
         return 1;

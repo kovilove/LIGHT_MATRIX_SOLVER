@@ -5,7 +5,7 @@
  */
 
 #include <iostream>
-#include "../LSS/light_sor_solver.hpp"
+#include "../LMS/light_matrix_solver.hpp"
 
 using std::cout;
 using std::endl;
@@ -14,10 +14,9 @@ constexpr size_t num = 100;
 
 int main()
 {
-    using namespace LSS;
+    using namespace LMS;
     // mat - 构造稀疏矩阵
     SparseMatrix<float> mat;
-    size_t row = 0;
     // x - 待求解量
     std::vector<float> x(num, {});
     // rhs - 右端项
@@ -46,7 +45,7 @@ int main()
     // SORSolver - SOR 求解（解耦架构）
     SORSolver<float> solver(100, 0.5f, 1e-6f);
     auto result = solver.Solve(mat, x, rhs);
-    if (result != LSS_OK)
+    if (result != LMS_OK)
     {
         cout << "calculate err, errcode: " << result << endl;
         return 1;

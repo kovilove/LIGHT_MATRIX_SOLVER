@@ -7,7 +7,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include "../LSS/light_sor_solver.hpp"
+#include "../LMS/light_matrix_solver.hpp"
 
 using std::cout;
 using std::endl;
@@ -16,7 +16,7 @@ constexpr size_t num = 10;
 
 int main()
 {
-    using namespace LSS;
+    using namespace LMS;
     // mat - 构造稀疏矩阵
     SparseMatrix<float> mat;
     size_t row = 0;
@@ -47,7 +47,7 @@ int main()
     auto t0 = std::chrono::high_resolution_clock::now();
 
     auto result = solver.Solve(mat, x, rhs);
-    if (result != LSS_OK)
+    if (result != LMS_OK)
     {
         cout << "calculate err";
         return 1;

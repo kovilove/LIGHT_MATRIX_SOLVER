@@ -1,15 +1,24 @@
 /**
- * @file light_sor_solver.hpp
- * @brief 轻量级 SOR（Successive Over-Relaxation，逐次超松弛）线性方程组求解器
- * @details 单头文件、header-only、C++17。
- *          CSR（Compressed Sparse Row）稀疏存储，适用于 CFD 等稀疏线性系统。
- *          数据（SparseMatrix）与求解算法（LinearSolverBase / SORSolver）解耦：
- *          矩阵只负责存储与组装，求解器负责迭代算法，支持可插拔扩展（未来可新增 GAMG 等）。
- *          用法：Reset → AddRow/AddMultiRow/AddMtx
- *          重填矩阵：ClearMtx → AddRow/AddMtx（保留尺寸）
+ * @file light_matrix_solver.hpp
+ * @brief 轻量级稀疏矩阵线性求解头文件库（header-only，C++17）
+ * @details 基于 CSR（Compressed Sparse Row，压缩稀疏行）稀疏存储的线性方程组求解库，
+ *          适用于 CFD 等大规模稀疏线性系统。
+ *
+ *          采用「数据 / 算法解耦 + 策略模式」的可插拔架构：
+ *          - SparseMatrix：矩阵数据容器，只负责存储与组装（CSR 三元组 + 对角元索引），不含算法；
+ *          - LinearSolverBase：求解算法抽象基类，定义统一求解接口
+ *            （Solve / 求解模式 / 收敛状态），供上层框架按基类指针运行时可切换求解器；
+ *          - 具体求解器继承基类并实现 Solve：当前实现 SOR（逐次超松弛）与
+ *            红黑染色并行 SOR，未来可扩展 Krylov 子空间法（CG / BiCGSTAB / GMRES）、
+ *            多重网格（AMG / GAMG）等，上层调用无需改动。
+ *
+ *          用法：
+ *          - 组装矩阵：Reset → AddRow / AddMultiRow / AddMtx；
+ *          - 重填矩阵：ClearMtx → AddRow / AddMtx（保留矩阵尺寸）；
+ *          - 求解：solver.Solve(mat, x, rhs)（右端项由调用方持有）。
  */
-#ifndef LIGHT_SOR_SOLVER_H
-#define LIGHT_SOR_SOLVER_H
+#ifndef LIGHT_MATRIX_SOLVER_H
+#define LIGHT_MATRIX_SOLVER_H
 
 #include <cmath>
 #include <climits>
@@ -29,7 +38,7 @@
 #include <omp.h>
 #endif
 
-namespace LSS
+namespace LMS
 {
     // ====================== 求解器全局参数 ======================
     constexpr double DEFAULT_EPSILON = 1e-7;  // 判零阈值：|x| <= eps 视为 0
@@ -43,21 +52,21 @@ namespace LSS
     /// @brief 求解器错误码
     enum ErrCode : unsigned short
     {
-        LSS_OK = 0,              // 操作成功 / 收敛
-        LSS_ERR,                 // 通用错误（保留）
-        LSS_INI_ERR,             // 矩阵未初始化或初始化参数非法
-        LSS_VEC_LEN_ERR,         // 向量长度不足
-        LSS_MTX_SIZE_ERR,        // 矩阵大小不足
-        LSS_DIAG_ELEM_ZERO,      // 对角元素为零（SOR 无法迭代）
-        LSS_NAN_ELEM_ERR,        // 输入含 NaN/Inf
-        LSS_SPARSE_ROW_FULL,     // 矩阵行已满，无法继续添加
-        LSS_SPARSE_ROW_NOT_FULL, // 矩阵未装满，无法求解
-        LSS_SOLVE_SET_ERR,       // 求解参数非法（iter/alphaW/tol 越界）
-        LSS_NOT_DIAG_DOM,        // 不满足严格对角占优
-        LSS_DIAG_DOM,            // 满足严格对角占优
-        LSS_NOT_CONVERGED,       // 迭代跑满仍未收敛（x 不可信）
-        LSS_DIVERGED,            // 迭代发散（残差爆炸 / NaN）
-        LSS_MODE_ERR,            // 求解模式非法
+        LMS_OK = 0,              // 操作成功 / 收敛
+        LMS_ERR,                 // 通用错误（保留）
+        LMS_INI_ERR,             // 矩阵未初始化或初始化参数非法
+        LMS_VEC_LEN_ERR,         // 向量长度不足
+        LMS_MTX_SIZE_ERR,        // 矩阵大小不足
+        LMS_DIAG_ELEM_ZERO,      // 对角元素为零（SOR 无法迭代）
+        LMS_NAN_ELEM_ERR,        // 输入含 NaN/Inf
+        LMS_SPARSE_ROW_FULL,     // 矩阵行已满，无法继续添加
+        LMS_SPARSE_ROW_NOT_FULL, // 矩阵未装满，无法求解
+        LMS_SOLVE_SET_ERR,       // 求解参数非法（iter/alphaW/tol 越界）
+        LMS_NOT_DIAG_DOM,        // 不满足严格对角占优
+        LMS_DIAG_DOM,            // 满足严格对角占优
+        LMS_NOT_CONVERGED,       // 迭代跑满仍未收敛（x 不可信）
+        LMS_DIVERGED,            // 迭代发散（残差爆炸 / NaN）
+        LMS_MODE_ERR,            // 求解模式非法
     };
 
     /**
@@ -66,10 +75,20 @@ namespace LSS
      */
     enum CalcProcessMode : unsigned short
     {
-        SOR_SERIAL_MODE = 0,    // 串行模式
-        SOR_MULTI_PROCESS_MODE, // 并行模式（红黑染色 SOR，需 -fopenmp）
-        SOR_AUTO_MODE,          // 自动模式（规模足够大且多线程时并行）
-        SOR_MODE_MAX,
+        LMS_SERIAL_MODE = 0,    // 串行模式
+        LMS_MULTI_PROCESS_MODE, // 并行模式（需 -fopenmp）
+        LMS_AUTO_MODE,          // 自动模式（规模足够大且多线程时并行）
+        LMS_MODE_MAX,
+    };
+
+    /**
+     * @brief 求解器类型
+     */
+    enum LightMatrixSolverType : unsigned short
+    {
+        LMS_DEFAULT = 0,
+        LMS_SOR_SOLVER,
+        LMS_SOLVER_TYPE_MAX,
     };
 
     /**
@@ -87,13 +106,13 @@ namespace LSS
     /**
      * @brief 依次执行校验条件列表，任一条件成立即返回其对应错误码
      * @param checkLists 条件-错误码列表（lambda 返回 true 表示"校验失败"）
-     * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+     * @return LMS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
      */
     using CheckFunc = std::function<bool()>;
     struct CheckCondition
     {
         CheckFunc checkFunc = {nullptr};
-        ErrCode errCode = {LSS_OK};
+        ErrCode errCode = {LMS_OK};
     };
     using CheckConditionLists = std::vector<CheckCondition>;
     unsigned short Check(const CheckConditionLists &checkLists)
@@ -105,26 +124,27 @@ namespace LSS
                 return errCode;
             }
         }
-        return LSS_OK;
+        return LMS_OK;
     }
 
+    // ====================== 存储数据矩阵 ======================
     /**
      * @brief 矩阵抽象基类：定义矩阵通用接口与公共状态
      * @note 禁止拷贝与移动（矩阵对象按引用使用）
      */
-    class BaseMatrix
+    class MatrixBase
     {
     public:
-        virtual ~BaseMatrix() = default;
-        BaseMatrix(const BaseMatrix &) = delete;
-        BaseMatrix(BaseMatrix &&) = delete;
-        BaseMatrix &operator=(const BaseMatrix &) = delete;
-        BaseMatrix &operator=(BaseMatrix &&) = delete;
+        virtual ~MatrixBase() = default;
+        MatrixBase(const MatrixBase &) = delete;
+        MatrixBase(MatrixBase &&) = delete;
+        MatrixBase &operator=(const MatrixBase &) = delete;
+        MatrixBase &operator=(MatrixBase &&) = delete;
 
         /**
          * @brief 重置矩阵为 colSize×colSize 方阵并清空旧数据
          * @param colSize 矩阵列数（方阵，即行数），必须大于 2
-         * @return LSS_OK 成功；LSS_INI_ERR 尺寸非法
+         * @return LMS_OK 成功；LMS_INI_ERR 尺寸非法
          */
         virtual unsigned short Reset(size_t colSize = 0) = 0;
 
@@ -134,12 +154,13 @@ namespace LSS
         virtual void Clear() = 0;
 
     protected:
-        BaseMatrix() = default;
+        MatrixBase() = default;
         size_t colSize_ = {0};   // 矩阵列数
         size_t rowSize_ = {0};   // 当前已添加的行数
         bool isValid_ = {false}; // 是否已初始化（Reset 成功）
     };
 
+    // ====================== CSR存储数据矩阵 ======================
     /**
      * @brief 基于 CSR 稀疏存储的方阵类（数据容器，仅负责存储与组装，不含迭代算法）
      * @tparam T 浮点类型（float/double），编译期 static_assert 校验
@@ -150,12 +171,12 @@ namespace LSS
      *       右端项 b 不存入矩阵，由调用方以 Solve(mat, x, rhs) 参数传入。
      */
     template <typename T>
-    class SparseMatrix : public BaseMatrix
+    class SparseMatrix : public MatrixBase
     {
         static_assert(std::is_floating_point_v<T>, "SparseMatrix requires floating-point T");
         using Arr = T *;
         using Vec = std::vector<T>;
-        using Mtx = std::vector<std::vector<T>>;
+        using Mat = std::vector<std::vector<T>>;
 
     public:
         SparseMatrix() = default;
@@ -164,7 +185,7 @@ namespace LSS
         /**
          * @brief 重置矩阵为 colSize×colSize 方阵并清空旧数据
          * @param colSize 矩阵列数（方阵，即行数），必须大于 2
-         * @return LSS_OK 成功；LSS_INI_ERR 尺寸非法（<= 2）
+         * @return LMS_OK 成功；LMS_INI_ERR 尺寸非法（<= 2）
          * @note 按每行约 7 个非零元（如 3D CFD 7 点模板）预留内存
          */
         unsigned short Reset(size_t colSize = 0) override
@@ -175,7 +196,7 @@ namespace LSS
             // 太小的数组没有意义
             if (colSize <= 2)
             {
-                return LSS_INI_ERR;
+                return LMS_INI_ERR;
             }
 
             // 列数固定
@@ -189,7 +210,7 @@ namespace LSS
             // 初始行数偏移为0
             rowPtr_.push_back(0);
 
-            return LSS_OK;
+            return LMS_OK;
         }
 
         /**
@@ -337,18 +358,18 @@ namespace LSS
         /**
          * @brief 添加矩阵的一行（稠密输入，内部压缩为 CSR 存储）
          * @param vec 该行数据，长度必须 >= colSize，仅前 colSize 个元素有效
-         * @return LSS_OK 成功；
-         *         LSS_INI_ERR 矩阵未初始化；LSS_SPARSE_ROW_FULL 行已满；
-         *         LSS_VEC_LEN_ERR 向量长度不足；
-         *         LSS_DIAG_ELEM_ZERO 对角元为零；
-         *         LSS_NAN_ELEM_ERR 元素含 NaN/Inf
+         * @return LMS_OK 成功；
+         *         LMS_INI_ERR 矩阵未初始化；LMS_SPARSE_ROW_FULL 行已满；
+         *         LMS_VEC_LEN_ERR 向量长度不足；
+         *         LMS_DIAG_ELEM_ZERO 对角元为零；
+         *         LMS_NAN_ELEM_ERR 元素含 NaN/Inf
          * @note 每行对角元（vec[rowSize_]）必须非零，否则 SOR 无法迭代；
          *       NaN/Inf 检查通过后才写入，失败不会留下部分数据
          */
         unsigned short AddRow(const Vec &vec)
         {
             auto result = AddRowByVecAbnormalCheck(vec);
-            if (result != LSS_OK)
+            if (result != LMS_OK)
             {
                 return result;
             }
@@ -371,7 +392,7 @@ namespace LSS
             structureRevision_++;
             assert(rowPtr_.size() == (rowSize_ + 1));
             assert(diagIdx_.size() == rowSize_);
-            return LSS_OK;
+            return LMS_OK;
         }
 
         /**
@@ -383,57 +404,57 @@ namespace LSS
          *       本函数在现有行之后继续追加；任一行失败时矩阵被 ClearMtx
          *       （保留矩阵尺寸，可修正后重试）
          */
-        unsigned short AddMultiRow(const Mtx &mat, size_t &errRow)
+        unsigned short AddMultiRow(const Mat &mat, size_t &errRow)
         {
-            unsigned short result = LSS_OK;
+            unsigned short result = LMS_OK;
             for (size_t i = 0; i < mat.size(); i++)
             {
                 result = AddRow(mat[i]);
-                if (result != LSS_OK)
+                if (result != LMS_OK)
                 {
                     errRow = i;
                     ClearMtx();
                     return result;
                 }
             }
-            return LSS_OK;
+            return LMS_OK;
         }
 
         /**
          * @brief 覆盖式批量组装矩阵（先清空现有行，再整体添加）
          * @param mat 稠密矩阵（行向量数组），行数不能少于 colSize（超出的行按满行报错）
          * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
-         * @return LSS_MTX_SIZE_ERR 行数不足 colSize；其余同 AddRow
+         * @return LMS_MTX_SIZE_ERR 行数不足 colSize；其余同 AddRow
          * @note 开头先 ClearMtx 清空已有行（保留矩阵尺寸）；
-         *       任一行失败时矩阵被 ClearMtx（保留尺寸与右端项，可修正后重试）
+         *       任一行失败时矩阵被 ClearMtx（保留矩阵尺寸，可修正后重试）
          */
-        unsigned short AddMtx(const Mtx &mat, size_t &errRow)
+        unsigned short AddMtx(const Mat &mat, size_t &errRow)
         {
             ClearMtx();
             // 检查是否能添加满
             if (mat.size() < colSize_)
             {
-                return LSS_MTX_SIZE_ERR;
+                return LMS_MTX_SIZE_ERR;
             }
-            unsigned short result = LSS_OK;
+            unsigned short result = LMS_OK;
             for (size_t i = 0; i < mat.size(); i++)
             {
                 result = AddRow(mat[i]);
-                if (result != LSS_OK)
+                if (result != LMS_OK)
                 {
                     errRow = i;
                     ClearMtx();
                     return result;
                 }
             }
-            return LSS_OK;
+            return LMS_OK;
         }
 
         /**
          * @brief 检查矩阵是否严格对角占优（|Aii| > Σ|Aij|，j≠i）
-         * @return LSS_DIAG_DOM 严格占优；
-         *         LSS_NOT_DIAG_DOM 不占优；
-         *         LSS_INI_ERR/LSS_SPARSE_ROW_NOT_FULL 状态非法
+         * @return LMS_DIAG_DOM 严格占优；
+         *         LMS_NOT_DIAG_DOM 不占优；
+         *         LMS_INI_ERR/LMS_SPARSE_ROW_NOT_FULL 状态非法
          * @note 严格对角占优是 SOR 收敛的充分条件而非必要条件，
          *       不占优不代表发散，仅提示风险
          */
@@ -444,14 +465,14 @@ namespace LSS
                  {
                      return (this->colSize_ == 0) || (!this->isValid_);
                  },
-                 LSS_INI_ERR},
+                 LMS_INI_ERR},
                 {[&]() -> bool
                  {
                      return this->rowSize_ < this->colSize_;
                  },
-                 LSS_SPARSE_ROW_NOT_FULL},
+                 LMS_SPARSE_ROW_NOT_FULL},
             });
-            if (result != LSS_OK)
+            if (result != LMS_OK)
             {
                 return result;
             }
@@ -473,17 +494,17 @@ namespace LSS
                 }
                 if (diagValue < valueSum - eps_)
                 {
-                    return LSS_NOT_DIAG_DOM;
+                    return LMS_NOT_DIAG_DOM;
                 }
             }
-            return LSS_DIAG_DOM;
+            return LMS_DIAG_DOM;
         }
 
     private:
         /**
          * @brief 添加矩阵的一行前的异常检查
          * @param vec 待添加的行向量
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         * @return LMS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
         unsigned short AddRowByVecAbnormalCheck(const Vec &vec)
         {
@@ -492,22 +513,22 @@ namespace LSS
                  {
                      return (this->colSize_ == 0) || (!this->isValid_);
                  },
-                 LSS_INI_ERR},
+                 LMS_INI_ERR},
                 {[&]() -> bool
                  {
                      return this->rowSize_ >= this->colSize_;
                  },
-                 LSS_SPARSE_ROW_FULL},
+                 LMS_SPARSE_ROW_FULL},
                 {[&]() -> bool
                  {
                      return vec.size() < this->colSize_;
                  },
-                 LSS_VEC_LEN_ERR},
+                 LMS_VEC_LEN_ERR},
                 {[&]() -> bool
                  {
                      return IsZeroElem(vec[this->rowSize_], this->eps_);
                  },
-                 LSS_DIAG_ELEM_ZERO},
+                 LMS_DIAG_ELEM_ZERO},
                 {[&]() -> bool
                  {
                      for (size_t i = 0; i < this->colSize_; ++i)
@@ -519,7 +540,7 @@ namespace LSS
                      }
                      return false;
                  },
-                 LSS_NAN_ELEM_ERR},
+                 LMS_NAN_ELEM_ERR},
             });
         }
 
@@ -532,6 +553,7 @@ namespace LSS
         size_t structureRevision_ = {0};          // 矩阵结构版本号（结构变化时递增）
     };
 
+    // ====================== 求解器基类 ======================
     /**
      * @brief 线性求解器抽象基类（策略模式）
      * @tparam T 浮点类型（float/double）
@@ -544,7 +566,7 @@ namespace LSS
     {
         using Arr = T *;
         using Vec = std::vector<T>;
-        using Mtx = std::vector<std::vector<T>>;
+        using Mat = std::vector<std::vector<T>>;
 
     public:
         virtual ~LinearSolverBase() = default;
@@ -559,23 +581,68 @@ namespace LSS
          * @param x 输入输出参数：进入时为零初值或上次解（作初值猜测），
          *          退出时为解向量（长度必须 >= mat.ColSize()）
          * @param rhs 右端项
-         * @return LSS_OK 收敛；其余为错误码（见 ErrCode）
+         * @return LMS_OK 收敛；其余为错误码（见 ErrCode）
          */
         virtual unsigned short Solve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs) = 0;
 
+        /// @brief 查询求解器类型
+        virtual LightMatrixSolverType GetSolverType() const = 0;
+
         /// @brief 获取最后一次求解的最终残差（未求解时为 0）
-        virtual T GetResidual() const = 0;
+        virtual T GetResidual() const
+        {
+            return finalRes_;
+        }
 
         /// @brief 获取最后一次求解实际执行的迭代次数
-        virtual size_t GetIterCount() const = 0;
+        virtual size_t GetIterCount() const
+        {
+            return iterCnt_;
+        }
 
         /// @brief 查询最后一次求解是否收敛
-        virtual bool IsConverged() const = 0;
+        virtual bool IsConverged() const
+        {
+            return converged_;
+        }
+
+        /// @brief 设置求解模式 串行/并行
+        virtual bool SetCalcProcessMode(unsigned short mode)
+        {
+            if (mode >= static_cast<unsigned short>(LMS_MODE_MAX))
+            {
+                return false;
+            }
+            mode_ = static_cast<CalcProcessMode>(mode);
+            return true;
+        }
+
+        virtual bool SetCalcProcessMode(CalcProcessMode mode)
+        {
+            if (mode >= LMS_MODE_MAX)
+            {
+                return false;
+            }
+            mode_ = mode;
+            return true;
+        }
+        /// @brief 查询当前求解模式
+        virtual CalcProcessMode GetCalcProcessMode() const
+        {
+            return mode_;
+        }
 
     protected:
         LinearSolverBase() = default;
+
+        T finalRes_ = T{};         // 最终残差
+        size_t iterCnt_ = {0};     // 实际迭代次数
+        bool converged_ = {false}; // 是否收敛
+
+        CalcProcessMode mode_ = {LMS_SERIAL_MODE}; // 计算模式
     };
 
+    // ====================== SOR求解器实现 ======================
     /**
      * @brief SOR（逐次超松弛）求解器实现
      * @tparam T 浮点类型（float/double）
@@ -592,7 +659,7 @@ namespace LSS
     {
         using Arr = T *;
         using Vec = std::vector<T>;
-        using Mtx = std::vector<std::vector<T>>;
+        using Mat = std::vector<std::vector<T>>;
 
     public:
         /**
@@ -613,12 +680,12 @@ namespace LSS
          * @param x 输入输出参数：进入时为零初值或上次解（作初值猜测），
          *          退出时为解向量（长度必须 >= mat.ColSize()）
          * @param rhs 右端项
-         *         LSS_INI_ERR 矩阵未初始化；
-         *         LSS_VEC_LEN_ERR x长度不足；
-         *         LSS_SPARSE_ROW_NOT_FULL 矩阵未填充满至方阵；
-         *         LSS_SOLVE_SET_ERR 构造参数 iter/omega/tol 非法；
-         *         LSS_NOT_CONVERGED 迭代跑满未达标（x 为最后迭代值，不可信）；
-         *         LSS_DIVERGED 发散（NaN/Inf 或残差爆炸）；
+         *         LMS_INI_ERR 矩阵未初始化；
+         *         LMS_VEC_LEN_ERR x长度不足；
+         *         LMS_SPARSE_ROW_NOT_FULL 矩阵未填充满至方阵；
+         *         LMS_SOLVE_SET_ERR 构造参数 iter/omega/tol 非法；
+         *         LMS_NOT_CONVERGED 迭代跑满未达标（x 为最后迭代值，不可信）；
+         *         LMS_DIVERGED 发散（NaN/Inf 或残差爆炸）；
          *         其余为参数/状态校验错误码
          * @note 每 10 次迭代检测一次残差；收敛或发散时提前返回，x 保留当时结果；
          *       计算模式由 SetCalcProcessMode 决定（串行 / 红黑并行 / 自动）
@@ -626,7 +693,7 @@ namespace LSS
         unsigned short Solve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs) override
         {
             auto result = SolverParaCheck(mat, x, rhs);
-            if (result != LSS_OK)
+            if (result != LMS_OK)
             {
                 return result;
             }
@@ -634,19 +701,19 @@ namespace LSS
 #ifdef _OPENMP
             maxThread_ = static_cast<unsigned short>(omp_get_max_threads());
 #endif
-            switch (mode_)
+            switch (this->mode_)
             {
-            case SOR_SERIAL_MODE:
+            case LMS_SERIAL_MODE:
             {
                 result = SerialSolve(mat, x, rhs);
                 break;
             }
-            case SOR_MULTI_PROCESS_MODE:
+            case LMS_MULTI_PROCESS_MODE:
             {
                 result = MultiProcSolve(mat, x, rhs);
                 break;
             }
-            case SOR_AUTO_MODE:
+            case LMS_AUTO_MODE:
             {
                 if ((maxThread_ == 1) || (mat.ColSize() / maxThread_ < 1000))
                 {
@@ -660,51 +727,16 @@ namespace LSS
             }
             default:
             {
-                result = static_cast<decltype(result)>(LSS_MODE_ERR);
+                result = static_cast<decltype(result)>(LMS_MODE_ERR);
             }
             }
 
             return result;
         }
 
-        T GetResidual() const override
+        LightMatrixSolverType GetSolverType() const override
         {
-            return finalRes_;
-        }
-
-        size_t GetIterCount() const override
-        {
-            return iterCnt_;
-        }
-
-        bool IsConverged() const override
-        {
-            return converged_;
-        }
-
-        bool SetCalcProcessMode(unsigned short mode)
-        {
-            if (mode >= static_cast<unsigned short>(SOR_MODE_MAX))
-            {
-                return false;
-            }
-            mode_ = static_cast<CalcProcessMode>(mode);
-            return true;
-        }
-
-        bool SetCalcProcessMode(CalcProcessMode mode)
-        {
-            if (mode >= SOR_MODE_MAX)
-            {
-                return false;
-            }
-            mode_ = mode;
-            return true;
-        }
-
-        CalcProcessMode GetCalcProcessMode()
-        {
-            return mode_;
+            return LMS_SOR_SOLVER;
         }
 
     private:
@@ -712,10 +744,9 @@ namespace LSS
          * @brief 求解前参数与状态校验
          * @param x 解向量
          * @param mat 系数矩阵
-         * @return LSS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
+         * @return LMS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
-        unsigned short
-        SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
+        unsigned short SolverParaCheck(const SparseMatrix<T> &mat, const Vec &x, const Vec &rhs) const
         {
             return Check({
                 {[&]() -> bool
@@ -723,13 +754,13 @@ namespace LSS
                      return (!mat.IsValid()) ||
                             (mat.ColSize() == 0);
                  },
-                 LSS_INI_ERR},
+                 LMS_INI_ERR},
                 {[&]() -> bool
                  {
                      return (x.size() < mat.ColSize()) ||
                             (rhs.size() < mat.ColSize());
                  },
-                 LSS_VEC_LEN_ERR},
+                 LMS_VEC_LEN_ERR},
                 {[&]() -> bool
                  {
                      for (size_t i = 0; i < mat.ColSize(); ++i)
@@ -742,20 +773,20 @@ namespace LSS
                      }
                      return false;
                  },
-                 LSS_NAN_ELEM_ERR},
+                 LMS_NAN_ELEM_ERR},
                 {[&]() -> bool
                  {
                      return mat.RowSize() < mat.ColSize();
                  },
-                 LSS_SPARSE_ROW_NOT_FULL},
+                 LMS_SPARSE_ROW_NOT_FULL},
                 {[&]() -> bool
                  {
-                     return ((maxIter_ < MIN_ITER) ||
-                             (maxIter_ > MAX_ITER) ||
-                             (omega_ <= 0 || omega_ > static_cast<T>(MAX_ALPHAW)) ||
-                             (tol_ <= 0 || tol_ > static_cast<T>(MAX_SET_TOL)));
+                     return ((this->maxIter_ < MIN_ITER) ||
+                             (this->maxIter_ > MAX_ITER) ||
+                             ((this->omega_ <= 0) || (this->omega_ > static_cast<T>(MAX_ALPHAW))) ||
+                             ((this->tol_ <= 0) || (this->tol_ > static_cast<T>(MAX_SET_TOL))));
                  },
-                 LSS_SOLVE_SET_ERR},
+                 LMS_SOLVE_SET_ERR},
             });
         }
 
@@ -763,11 +794,10 @@ namespace LSS
          * @brief 迭代过程中的发散检查
          * @param res 当前残差
          * @param res0 初始残差
-         * @param bNorm 均匀残差 L2 范数 ||b||₂
          * @param eps 判零阈值
-         * @return LSS_OK 正常；LSS_DIVERGED 发散
+         * @return LMS_OK 正常；LMS_DIVERGED 发散
          */
-        unsigned short DivergenceCheck(T res, T res0, T bNorm, T eps) const
+        unsigned short DivergenceCheck(T res, T res0, T eps) const
         {
             return Check({
                 {[&]() -> bool
@@ -776,7 +806,7 @@ namespace LSS
                             (res > static_cast<T>(MAX_OVERLIMIT_TOL)) ||
                             ((res0 > eps) && (res > 1000 * res0));
                  },
-                 LSS_DIVERGED},
+                 LMS_DIVERGED},
             });
         }
 
@@ -797,8 +827,8 @@ namespace LSS
             const size_t n = mat.ColSize();
             const T eps = mat.Eps();
 
-            iterCnt_ = 0;
-            converged_ = false;
+            this->iterCnt_ = 0;
+            this->converged_ = false;
             const size_t checkEvery = 10;
 
             // 归一化残差 / 初始残差
@@ -825,10 +855,10 @@ namespace LSS
                 if ((it + 1) % checkEvery == 0)
                 {
                     T res = ComputeResidual(mat, x, rhs);
-                    finalRes_ = res;
-                    iterCnt_ = it + 1;
-                    auto err = DivergenceCheck(res, res0, bNorm, eps);
-                    if (err != LSS_OK)
+                    this->finalRes_ = res;
+                    this->iterCnt_ = it + 1;
+                    auto err = DivergenceCheck(res, res0, eps);
+                    if (err != LMS_OK)
                     {
                         return err;
                     }
@@ -836,12 +866,12 @@ namespace LSS
                     T resNorm = IsZeroElem(bNorm, eps) ? res : (res / bNorm);
                     if (resNorm < tol_)
                     {
-                        converged_ = true;
-                        return LSS_OK;
+                        this->converged_ = true;
+                        return LMS_OK;
                     }
                 }
             }
-            return LSS_NOT_CONVERGED;
+            return LMS_NOT_CONVERGED;
         }
 
         /**
@@ -863,11 +893,10 @@ namespace LSS
             const auto &colIdx = mat.ColIdx();
             const auto &rowPtr = mat.RowPtr();
             const auto &diagIdx = mat.DiagIdx();
-            const size_t n = mat.ColSize();
             const T eps = mat.Eps();
 
-            iterCnt_ = 0;
-            converged_ = false;
+            this->iterCnt_ = 0;
+            this->converged_ = false;
             const size_t checkEvery = 10;
             // 归一化残差 / 初始残差
             T bNorm = ComputeUniformResidual(mat, rhs);
@@ -911,10 +940,10 @@ namespace LSS
                 if ((it + 1) % checkEvery == 0)
                 {
                     T res = ComputeResidual(mat, x, rhs);
-                    finalRes_ = res;
-                    iterCnt_ = it + 1;
-                    auto err = DivergenceCheck(res, res0, bNorm, eps);
-                    if (err != LSS_OK)
+                    this->finalRes_ = res;
+                    this->iterCnt_ = it + 1;
+                    auto err = DivergenceCheck(res, res0, eps);
+                    if (err != LMS_OK)
                     {
                         return err;
                     }
@@ -922,12 +951,12 @@ namespace LSS
                     T resNorm = IsZeroElem(bNorm, eps) ? res : (res / bNorm);
                     if (resNorm < tol_)
                     {
-                        converged_ = true;
-                        return LSS_OK;
+                        this->converged_ = true;
+                        return LMS_OK;
                     }
                 }
             }
-            return LSS_NOT_CONVERGED;
+            return LMS_NOT_CONVERGED;
         }
 
         /**
@@ -1043,18 +1072,13 @@ namespace LSS
         T omega_;        // 松弛因子
         T tol_;          // 收敛容差
 
-        T finalRes_ = T{};         // 最终残差
-        size_t iterCnt_ = {0};     // 实际迭代次数
-        bool converged_ = {false}; // 是否收敛
-
         // 并行SOR相关变量
-        CalcProcessMode mode_ = {SOR_SERIAL_MODE}; // 计算模式
-        unsigned short maxThread_ = {1};           // 最大线程数
-        std::vector<unsigned char> color_;         // 染色结果：1=红，2=黑
-        std::vector<size_t> redList_;              // 红点列表
-        std::vector<size_t> blackList_;            // 黑点列表
-        size_t coloredRevision_;                   // 已染色的矩阵结构版本号
+        unsigned short maxThread_ = {1};   // 最大线程数
+        std::vector<unsigned char> color_; // 染色结果：1=红，2=黑
+        std::vector<size_t> redList_;      // 红点列表
+        std::vector<size_t> blackList_;    // 黑点列表
+        size_t coloredRevision_;           // 已染色的矩阵结构版本号
     };
 }
 
-#endif // LIGHT_SOR_SOLVER_H
+#endif // LIGHT_MATRIX_SOLVER_H
