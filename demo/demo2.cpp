@@ -24,7 +24,7 @@ int main()
 
     // 设置矩阵尺寸
     mat.Reset(num);
-    // AddMtx - 逐行添加向量
+    // 逐行添加向量（AddRow）
     for (size_t i = 0; i < num; ++i)
     {
         std::vector<float> row_vec(num, 0);

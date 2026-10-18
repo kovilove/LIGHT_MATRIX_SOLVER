@@ -13,8 +13,8 @@
  *            多重网格（AMG / GAMG）等，上层调用无需改动。
  *
  *          用法：
- *          - 组装矩阵：Reset → AddRow / AddMultiRow / AddMtx；
- *          - 重填矩阵：ClearMtx → AddRow / AddMtx（保留矩阵尺寸）；
+ *          - 组装矩阵：Reset → AddRow / AddMultiRow / AddMat；
+ *          - 重填矩阵：ClearMat → AddRow / AddMat（保留矩阵尺寸）；
  *          - 求解：solver.Solve(mat, x, rhs)（右端项由调用方持有）。
  */
 #ifndef LIGHT_MATRIX_SOLVER_H
@@ -56,7 +56,7 @@ namespace LMS
         LMS_ERR,                 // 通用错误（保留）
         LMS_INI_ERR,             // 矩阵未初始化或初始化参数非法
         LMS_VEC_LEN_ERR,         // 向量长度不足
-        LMS_MTX_SIZE_ERR,        // 矩阵大小不足
+        LMS_MAT_SIZE_ERR,        // 矩阵大小不足
         LMS_DIAG_ELEM_ZERO,      // 对角元素为零（SOR 无法迭代）
         LMS_NAN_ELEM_ERR,        // 输入含 NaN/Inf
         LMS_SPARSE_ROW_FULL,     // 矩阵行已满，无法继续添加
@@ -232,9 +232,9 @@ namespace LMS
         /**
          * @brief 清空矩阵系数内容（保留矩阵尺寸，可重新填充）
          * @note 仅清空 CSR 数据并重置行计数，colSize_/isValid_ 保留；
-         *       清空后可再次 AddRow/AddMtx 重新组装矩阵
+         *       清空后可再次 AddRow/AddMat 重新组装矩阵
          */
-        void ClearMtx()
+        void ClearMat()
         {
             value_.clear();
             colIdx_.clear();
@@ -346,7 +346,7 @@ namespace LMS
 
         /**
          * @brief 获取矩阵结构版本号
-         * @details 每次结构变化（ClearMtx / AddRow）递增，用于求解器判断
+         * @details 每次结构变化（ClearMat / AddRow）递增，用于求解器判断
          *          是否需重建红黑染色缓存等与结构相关的预处理数据
          * @return 当前结构版本号
          */
@@ -400,8 +400,8 @@ namespace LMS
          * @param mat 待追加的稠密行数组（行向量数组）
          * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
          * @return 同 AddRow
-         * @note 与 AddMtx 的区别：AddMtx 会先清空矩阵再整体重建（覆盖语义），
-         *       本函数在现有行之后继续追加；任一行失败时矩阵被 ClearMtx
+         * @note 与 AddMat 的区别：AddMat 会先清空矩阵再整体重建（覆盖语义），
+         *       本函数在现有行之后继续追加；任一行失败时矩阵被 ClearMat
          *       （保留矩阵尺寸，可修正后重试）
          */
         unsigned short AddMultiRow(const Mat &mat, size_t &errRow)
@@ -413,7 +413,7 @@ namespace LMS
                 if (result != LMS_OK)
                 {
                     errRow = i;
-                    ClearMtx();
+                    ClearMat();
                     return result;
                 }
             }
@@ -424,17 +424,17 @@ namespace LMS
          * @brief 覆盖式批量组装矩阵（先清空现有行，再整体添加）
          * @param mat 稠密矩阵（行向量数组），行数不能少于 colSize（超出的行按满行报错）
          * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
-         * @return LMS_MTX_SIZE_ERR 行数不足 colSize；其余同 AddRow
-         * @note 开头先 ClearMtx 清空已有行（保留矩阵尺寸）；
-         *       任一行失败时矩阵被 ClearMtx（保留矩阵尺寸，可修正后重试）
+         * @return LMS_MAT_SIZE_ERR 行数不足 colSize；其余同 AddRow
+         * @note 开头先 ClearMat 清空已有行（保留矩阵尺寸）；
+         *       任一行失败时矩阵被 ClearMat（保留矩阵尺寸，可修正后重试）
          */
-        unsigned short AddMtx(const Mat &mat, size_t &errRow)
+        unsigned short AddMat(const Mat &mat, size_t &errRow)
         {
-            ClearMtx();
+            ClearMat();
             // 检查是否能添加满
             if (mat.size() < colSize_)
             {
-                return LMS_MTX_SIZE_ERR;
+                return LMS_MAT_SIZE_ERR;
             }
             unsigned short result = LMS_OK;
             for (size_t i = 0; i < mat.size(); i++)
@@ -443,7 +443,7 @@ namespace LMS
                 if (result != LMS_OK)
                 {
                     errRow = i;
-                    ClearMtx();
+                    ClearMat();
                     return result;
                 }
             }

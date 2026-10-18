@@ -11,7 +11,7 @@
 - **自动模式（AUTO）**：规模足够大且多线程时自动启用并行，否则走串行，免去手动开关
 - **右端项外置**：矩阵只负责存储与组装，右端项 `b` 由调用方通过 `Solve(mat, x, rhs)` 传入，职责更清晰
 - **健壮性检查与发散保护**：NaN/Inf 校验、对角元非零检查、参数合法性校验、完整错误码体系；迭代中周期性监测残差，相对 / 绝对双重发散判定，不收敛时明确报错而非返回垃圾解
-- **便捷的矩阵组装**：逐行（`AddRow`）、批量追加（`AddMultiRow`）、覆盖式整表（`AddMtx`）三种输入方式
+- **便捷的矩阵组装**：逐行（`AddRow`）、批量追加（`AddMultiRow`）、覆盖式整表（`AddMat`）三种输入方式
 - **模板化浮点类型**：支持 `float` / `double` 等，编译期 `static_assert` 强制校验
 
 ## 当前限制
@@ -50,7 +50,7 @@ int main()
 
     // 2. 组装矩阵（对角元必须非零）
     size_t errRow = 0;
-    mat.AddMtx({
+    mat.AddMat({
         {4.0, 1.0, 0.0},
         {1.0, 3.0, 1.0},
         {0.0, 1.0, 4.0},
@@ -88,10 +88,10 @@ g++ -std=c++17 -O2 -fopenmp demo/demo3.cpp -o demo3
 |---|---|
 | `Reset(colSize)` | 重置为 `colSize × colSize` 方阵并预留内存 |
 | `Clear()` | 清空一切，恢复未初始化状态 |
-| `ClearMtx()` | 仅清空矩阵系数（保留矩阵尺寸，可重新填充） |
+| `ClearMat()` | 仅清空矩阵系数（保留矩阵尺寸，可重新填充） |
 | `AddRow(vec)` | 添加一行（稠密输入，内部压缩为 CSR） |
 | `AddMultiRow(mat, errRow)` | 批量追加；失败时 `errRow` 定位出错行 |
-| `AddMtx(mat, errRow)` | 覆盖式批量组装；带尺寸预检 |
+| `AddMat(mat, errRow)` | 覆盖式批量组装；带尺寸预检 |
 | `IsValid()` / `IsFullMatrix()` | 查询初始化状态 / 是否已装满可求解 |
 | `ColSize()` / `RowSize()` / `NotZeroElemNum()` | 查询矩阵属性 |
 | `Values()` / `ColIdx()` / `RowPtr()` / `DiagIdx()` / `Eps()` / `StructureRevision()` | CSR 结构只读访问器（供求解器使用） |
@@ -153,7 +153,7 @@ public:
 ## 错误码
 
 所有 API 均返回错误码，完整带注释清单见头文件。
-主要错误码：`LMS_OK`（成功）、`LMS_INI_ERR`、`LMS_VEC_LEN_ERR`、`LMS_MTX_SIZE_ERR`、
+主要错误码：`LMS_OK`（成功）、`LMS_INI_ERR`、`LMS_VEC_LEN_ERR`、`LMS_MAT_SIZE_ERR`、
 `LMS_DIAG_ELEM_ZERO`、`LMS_NAN_ELEM_ERR`、`LMS_SPARSE_ROW_FULL`、
 `LMS_SPARSE_ROW_NOT_FULL`、`LMS_SOLVE_SET_ERR`、`LMS_NOT_CONVERGED`、`LMS_DIVERGED`、`LMS_MODE_ERR`。
 
