@@ -57,6 +57,7 @@ namespace LSS
         LSS_DIAG_DOM,            // 满足严格对角占优
         LSS_NOT_CONVERGED,       // 迭代跑满仍未收敛（x 不可信）
         LSS_DIVERGED,            // 迭代发散（残差爆炸 / NaN）
+        LSS_MODE_ERR,            // 求解模式非法
     };
 
     /**
@@ -636,15 +637,19 @@ namespace LSS
 #ifdef _OPENMP
             maxThread_ = static_cast<unsigned short>(omp_get_max_threads());
 #endif
-            if (mode_ == SOR_SERIAL_MODE)
+            switch (mode_)
+            {
+            case SOR_SERIAL_MODE:
             {
                 result = SerialSolve(mat, x, rhs, bNorm, res0);
+                break;
             }
-            else if (mode_ == SOR_MULTI_PROCESS_MODE)
+            case SOR_MULTI_PROCESS_MODE:
             {
                 result = MultiProcSolve(mat, x, rhs, bNorm, res0);
+                break;
             }
-            else if (mode_ == SOR_AUTO_MODE)
+            case SOR_AUTO_MODE:
             {
                 if ((maxThread_ == 1) || (mat.ColSize() / maxThread_ < 1000))
                 {
@@ -654,6 +659,12 @@ namespace LSS
                 {
                     result = MultiProcSolve(mat, x, rhs, bNorm, res0);
                 }
+                break;
+            }
+            default:
+            {
+                result = static_cast<decltype(result)>(LSS_MODE_ERR);
+            }
             }
 
             return result;
