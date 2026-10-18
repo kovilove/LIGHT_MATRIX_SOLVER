@@ -106,6 +106,7 @@ g++ -std=c++17 -O2 -fopenmp demo/demo3.cpp -o demo3
 | `solver.GetResidual()` / `GetIterCount()` | 查询最终残差 / 实际迭代次数 |
 | `solver.IsConverged()` | 查询是否收敛 |
 | `solver.SetCalcProcessMode(mode)` / `GetCalcProcessMode()` | 设置 / 查询计算模式（串行 / 并行 / 自动） |
+| `solver.SetSorSolverPara(maxIter, omega, tol)` | 设置最大迭代次数 / 松弛因子 / 收敛容差 |
 
 ## 求解器类型
 

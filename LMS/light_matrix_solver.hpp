@@ -739,6 +739,13 @@ namespace LMS
             return LMS_SOR_SOLVER;
         }
 
+        void SetSorSolverPara(size_t maxIter, T omega, T tol = static_cast<T>(DEFAULT_TOL))
+        {
+            maxIter_ = maxIter;
+            omega_ = omega;
+            tol_ = tol;
+        }
+
     private:
         /**
          * @brief 求解前参数与状态校验
