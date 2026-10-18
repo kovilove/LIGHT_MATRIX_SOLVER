@@ -6,6 +6,8 @@
 
 - **单头文件、零依赖**：把 `LSS/light_sor_solver.hpp` 拷进工程即可使用，无任何外部依赖，C++17 编译
 - **CSR 稀疏存储**：内存高效，适合大规模稀疏系统；对角元位置单独索引，迭代求解 O(1) 访问
+- **可插拔求解器架构**：`SparseMatrix`（数据容器）与 `LinearSolverBase`（抽象基类）+ `SORSolver`（实现）解耦，策略模式便于运行时切换求解器、未来扩展 GAMG/PCG 等
+- **串行 SOR 开箱即用**：松弛因子可调，`1.0` 即 Gauss-Seidel；红黑染色并行（OpenMP）规划中，将消除 GS/SOR 迭代依赖、以两 pass 并行更新保留顺序收敛语义
 - **健壮性检查与发散保护**：NaN/Inf 校验、对角元非零检查、参数合法性校验、完整错误码体系；迭代中周期性监测残差，相对/绝对双重发散判定，不收敛时明确报错而非返回垃圾解
 - **便捷的矩阵组装**：逐行（`AddRow`）、批量追加（`AddMultiRow`）、覆盖式整表（`AddMtx`）三种输入方式；右端项支持向量累加/覆盖与标量累加/覆盖（`AddRhs`/`SetRhs`）
 - **模板化浮点类型**：支持 `float`/`double` 等，编译期 `static_assert` 强制校验
@@ -13,7 +15,7 @@
 ## 当前限制
 
 - 仅支持方阵；无预条件子与直接法后备，松弛因子需手动调整
-- 单线程、对象禁止拷贝/移动
+- 当前仅串行求解；红黑染色并行（OpenMP）在规划中
 
 ## 目录结构
 
@@ -55,7 +57,8 @@ int main()
 
     // 4. SOR 求解 Ax = b（w = 1.2，最多 100 次迭代）
     std::vector<double> x(3, 0.0);
-    unsigned short ret = mtx.SOR_Solve(x, 100, 1.2);
+    SORSolver<double> solver(100, 1.2);              // 构造求解器（数据与算法解耦）
+    unsigned short ret = solver.Solve(x, mtx);       // 传入矩阵求解
 
     if (ret == LSS_OK)
     {
@@ -66,10 +69,11 @@ int main()
 }
 ```
 
-任意 C++17 编译器即可编译：
+任意 C++17 编译器即可编译（并行示例需 `-fopenmp`）：
 
 ```bash
-g++ -std=c++17 -O2 example/example1.cpp -o example1
+g++ -std=c++17 -O2 example/demo1.cpp -o demo1
+g++ -std=c++17 -O2 -fopenmp example/demo3.cpp -o demo3
 ```
 
 ## API 一览
@@ -85,11 +89,21 @@ g++ -std=c++17 -O2 example/example1.cpp -o example1
 | `AddMtx(mtx, errRow)` | 覆盖式批量组装；带尺寸预检 |
 | `AddRhs(vec)` / `AddRhs(val)` | 累加右端项：`rhs += vec` / `rhs[i] += val` |
 | `SetRhs(vec)` / `SetRhs(val)` | 覆盖右端项：`rhs = vec` / `rhs[i] = val` |
-| `SOR_Solve(x, iter, alphaW, tol)` | 求解 `Ax = b`；`x` 输入初值猜测、输出解 |
 | `IsValid()` / `IsFullMatrix()` | 查询初始化状态 / 是否已装满可求解 |
 | `ColSize()` / `RowSize()` / `NotZeroElemNum()` / `Rhs()` | 查询矩阵属性 |
 
-### SOR_Solve 参数
+### 求解器（`LinearSolverBase` 抽象基类 / `SORSolver` 实现）
+
+| 类 / 成员 | 说明 |
+|---|---|
+| `SORSolver(maxIter, omega, tol, mode)` | 构造 SOR 求解器；`mode` 取 `SOR_SERIAL_MODE` / `SOR_MULTI_PROCESS_MODE` / `SOR_AUTO_MODE` |
+| `solver.Solve(x, mat)` | 求解 `Ax = b`；`x` 输入初值猜测、输出解，`mat` 为数据容器 |
+| `solver.GetResidual()` / `GetIterCount()` | 查询最终残差 / 实际迭代次数 |
+| `solver.IsConverged()` | 查询是否收敛 |
+
+未来新增求解器（如 GAMG）只需继承 `LinearSolverBase` 并实现 `Solve`，上层调用无需改动。
+
+### SORSolver 参数
 
 | 参数 | 含义 | 合法范围 |
 |---|---|---|

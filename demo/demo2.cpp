@@ -44,13 +44,17 @@ int main()
     }
     // SetRhs - 添加右端项
     mtx.SetRhs(rhs);
-    // SOR_Solve -  SOR求解
-    auto result = mtx.SOR_Solve(x, 100, 0.5);
+
+    // SORSolver - SOR 求解（解耦架构）
+    SORSolver<float> solver(100, 0.5f, 1e-6f, SOR_SERIAL_MODE);
+    auto result = solver.Solve(x, mtx);
     if (result != LSS_OK)
     {
         cout << "calculate err, errcode: " << result << endl;
         return 1;
     }
+    std::cout << "residual: " << solver.GetResidual()
+              << ", iter: " << solver.GetIterCount() << endl;
     // 打印机求解量
     for (auto &ele : x)
     {

@@ -43,10 +43,12 @@ int main()
                row);
     // SetRhs - 添加右端项
     mtx.SetRhs(rhs);
-    // SOR_Solve -  SOR求解
+
+    // SORSolver - SOR 求解（解耦架构：矩阵只管数据，求解器只管算法）
+    SORSolver<float> solver(1000, 0.5f, 1e-6f, SOR_SERIAL_MODE);
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    auto result = mtx.SOR_Solve(x, 1000, 0.5);
+    auto result = solver.Solve(x, mtx);
     if (result != LSS_OK)
     {
         cout << "calculate err";
@@ -55,7 +57,9 @@ int main()
     auto t1 = std::chrono::high_resolution_clock::now();
 
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-    std::cout << "SOR_Solve time: " << duration.count() << " microseconds" << endl;
+    std::cout << "SORSolver Solve time: " << duration.count() << " microseconds" << endl;
+    std::cout << "residual: " << solver.GetResidual()
+              << ", iter: " << solver.GetIterCount() << endl;
     // 打印机求解量
     for (auto &ele : x)
     {
