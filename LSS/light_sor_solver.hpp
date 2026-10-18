@@ -854,7 +854,7 @@ namespace LSS
          */
         unsigned short MultiProcSolve(const SparseMatrix<T> &mat, Vec &x, const Vec &rhs)
         {
-            if (!BuildRedBlackColoring(mat))
+            if ((maxThread_ == 1) || !BuildRedBlackColoring(mat))
             {
                 return SerialSolve(mat, x, rhs); // 非二分图退化串行
             }
