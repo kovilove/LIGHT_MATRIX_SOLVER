@@ -1,5 +1,5 @@
 /**
- * @file example2.cpp
+ * @file demo2.cpp
  * @brief 示例代码
  * @note  100 × 100 稀疏矩阵求解
  */

@@ -64,7 +64,7 @@ int main()
     SORSolver<float> solver(100, 0.5f, 1e-6f);
 
     // 当前串行 SOR
-    solver.SetCalcProcessMode(LMS_SERIAL_MODE);
+    solver.SetCalcProcessMode(LMS_CALC_MODE_SERIAL);
     auto t0 = std::chrono::high_resolution_clock::now();
     auto result = solver.Solve(mat, x1, rhs);
     if (result != LMS_OK)
@@ -75,7 +75,7 @@ int main()
     auto t1 = std::chrono::high_resolution_clock::now();
 
     // 当前并行 SOR
-    solver.SetCalcProcessMode(LMS_MULTI_PROCESS_MODE);
+    solver.SetCalcProcessMode(LMS_CALC_MODE_MULTI_PROCESS_MODE);
     auto t2 = std::chrono::high_resolution_clock::now();
 #ifdef _OPENMP
     result = solver.Solve(mat, x2, rhs);

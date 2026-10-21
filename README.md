@@ -1,11 +1,12 @@
 # LIGHT_MATRIX_SOLVER
 
-一个轻量级、**header-only**、C++17 的稀疏矩阵线性求解头文件库。基于 **CSR（Compressed Sparse Row，压缩稀疏行）** 稀疏存储，采用**数据 / 算法解耦 + 策略模式**架构：矩阵只负责存储与组装，求解算法通过抽象基类 `LinearSolverBase` 可插拔扩展。当前内置 **SOR（逐次超松弛）** 与 **Jacobi（雅可比）** 两种迭代求解器（均含 OpenMP 并行实现），计划后续按需扩展 Krylov 子空间法（CG / BiCGSTAB / GMRES）、多重网格（AMG / GAMG）等求解器，上层调用无需改动。适用于 CFD 等大规模稀疏线性系统场景——在简单场景下不想引入完整线性代数库时可尝试使用。
+一个轻量级、**header-only**、C++17 的稀疏矩阵线性求解头文件库，由两个头文件组成：`LMS/csr_matrix.hpp`（稀疏矩阵存储与装配）+ `LMS/light_matrix_solver.hpp`（迭代求解器）。基于 **CSR（Compressed Sparse Row，压缩稀疏行）** 稀疏存储，采用**数据 / 算法解耦 + 策略模式**架构：矩阵只负责存储与组装，求解算法通过抽象基类 `LinearSolverBase` 可插拔扩展。矩阵支持 **DEFAULT 顺序填充**与 **COO 动态装配**两种方式；当前内置 **SOR（逐次超松弛）** 与 **Jacobi（雅可比）** 两种迭代求解器（均含 OpenMP 并行实现），计划后续按需扩展 Krylov 子空间法（CG / BiCGSTAB / GMRES）、多重网格（AMG / GAMG）等求解器，上层调用无需改动。适用于 CFD 等大规模稀疏线性系统场景——在简单场景下不想引入完整线性代数库时可尝试使用。
 
 ## 特性
 
-- **单头文件、零依赖**：把 `LMS/light_matrix_solver.hpp` 拷进工程即可使用，C++17 编译，无任何外部依赖（并行模式可选 OpenMP）
+- **两个头文件、零依赖**：`csr_matrix.hpp`（存储 / 装配）+ `light_matrix_solver.hpp`（求解器）拷进工程即可使用，C++17 编译，无任何外部依赖（并行模式可选 OpenMP）
 - **CSR 稀疏存储**：内存高效，适合大规模稀疏系统；对角元位置单独索引，迭代求解 O(1) 访问
+- **双装配方式**：DEFAULT 按行顺序填充（`AddRow` / `AddMultiRow` / `AddMat`，适合固定模板反复组装的快路径）；COO 以坐标三元组动态装配（`AddRow(vec,row)` / `Finalize`，支持任意行序、可重复累加），最终统一压缩为标准 CSR
 - **可插拔求解器架构**：`SparseMatrix`（数据容器）与 `LinearSolverBase`（抽象基类）+ 多求解器实现（`SORSolver` / `JacobiSolver`）解耦，策略模式便于运行时切换，未来扩展 GAMG / PCG / CG 等无需改动上层
 - **SOR 串行 + 红黑染色并行**：串行 SOR 开箱即用（松弛因子可调，`1.0` 即 Gauss-Seidel）；并行模式将未知量按矩阵拓扑二分（红/黑），每轮迭代拆成两个并行 pass（OpenMP），保留顺序收敛语义；含奇环的非二分图自动退化为串行
 - **Jacobi 串行 + 直接并行**：每轮用上一轮旧值同步更新全部未知量，天然无数据依赖，可直接 `parallel for` 并行；收敛轮数多于 SOR/GS，但单轮并行度高、无同步依赖
@@ -25,11 +26,15 @@
 ```
 LIGHT_MATRIX_SOLVER/
 ├── LMS/
-│   └── light_matrix_solver.hpp   # 整个库（header-only）
+│   ├── csr_matrix.hpp            # 稀疏矩阵存储 / 装配（CSR + COO 双方式，header-only）
+│   └── light_matrix_solver.hpp   # 求解器：LinearSolverBase + SOR / Jacobi（header-only）
 ├── demo/
-│   ├── demo1.cpp                 # 10×10 稀疏系统示例
-│   ├── demo2.cpp                 # 三对角系统示例
-│   └── demo3.cpp                 # 10000×10000 稀疏系统：串行 vs 红黑并行对照与一致性校验
+│   ├── demo1.cpp                 # 10×10 稀疏系统求解示例
+│   ├── demo2.cpp                 # 100×100 稀疏系统求解示例
+│   ├── demo3.cpp                 # 30000×30000：SOR 求解（数据 / 算法解耦架构演示）
+│   ├── demo4.cpp                 # 10×10：Jacobi 求解 + 计时示例
+│   ├── demo5.cpp                 # 30000×30000：Jacobi 求解
+│   └── demo6.cpp                 # COO 按行动态装配接口示例
 └── README.md
 ```
 
@@ -74,6 +79,26 @@ int main()
 }
 ```
 
+若需按任意行序动态装配矩阵（例如 CFD 中先拼内部节点、后拼边界），可用 COO 方式：
+
+```cpp
+#include "LMS/light_matrix_solver.hpp"
+using namespace LMS;
+
+SparseMatrix<double> mat;
+mat.Reset(3);
+mat.SetAssemblyMethod(LMS_ASSEMBLY_METHOD_COO); // 切换到 COO 动态装配
+
+mat.AddRow({4.0, 1.0, 0.0}, 0);   // 先填第 0 行
+mat.AddRow({2.0, 0.0, 5.0}, 2);   // 再填第 2 行（行序可任意）
+mat.AddRow({0.0, 3.0, 0.0}, 1);   // 后填第 1 行
+mat.AddRow({4.0, 1.0, 0.0}, 0);   // 重复 (0,0)，Finalize 时自动累加合并
+
+mat.Finalize();                   // 排序压缩 → 标准 CSR，之后即可求解
+```
+
+两种装配方式产出的矩阵结构一致，求解器调用方式完全相同。
+
 任意 C++17 编译器即可编译（并行示例需 `-fopenmp`）：
 
 ```bash
@@ -93,6 +118,10 @@ g++ -std=c++17 -O2 -fopenmp demo/demo3.cpp -o demo3
 | `AddRow(vec)` | 添加一行（稠密输入，内部压缩为 CSR） |
 | `AddMultiRow(mat, errRow)` | 批量追加；失败时 `errRow` 定位出错行 |
 | `AddMat(mat, errRow)` | 覆盖式批量组装；带尺寸预检 |
+| `SetAssemblyMethod(method)` | 设置装配方式（`DEFAULT` / `COO`），须在开始装配前调用 |
+| `AddRow(vec, row)` | **COO**：动态添加第 `row` 行（行序任意、可重复累加） |
+| `Finalize()` | **COO**：排序、压缩并转换为标准 CSR（装配收尾） |
+| `AssemblyMethod()` / `AssemblyStatus()` | 查询装配方式 / 装配状态 |
 | `IsValid()` / `IsFullMatrix()` | 查询初始化状态 / 是否已装满可求解 |
 | `ColSize()` / `RowSize()` / `NotZeroElemNum()` | 查询矩阵属性 |
 | `Values()` / `ColIdx()` / `RowPtr()` / `DiagIdx()` / `Eps()` / `StructureRevision()` | CSR 结构只读访问器（供求解器使用） |
@@ -104,7 +133,7 @@ g++ -std=c++17 -O2 -fopenmp demo/demo3.cpp -o demo3
 | `SORSolver(maxIter, omega, tol)` | 构造 SOR 求解器 |
 | `JacobiSolver(maxIter, tol)` | 构造 Jacobi 求解器 |
 | `solver.Solve(mat, x, rhs)` | 求解 `Ax = b`；`x` 输入初值猜测、输出解，`mat` 为数据容器，`rhs` 为右端项 |
-| `solver.GetSolverType()` | 查询求解器类型（`LightMatrixSolverType`，当前为 `LMS_SOR_SOLVER`） |
+| `solver.GetSolverType()` | 查询求解器类型（`LightMatrixSolverType`，当前为 `LMS_SOLVER_TYPE_SOR`） |
 | `solver.GetResidual()` / `GetIterCount()` | 查询最终残差 / 实际迭代次数 |
 | `solver.IsConverged()` | 查询是否收敛 |
 | `solver.SetCalcProcessMode(mode)` / `GetCalcProcessMode()` | 设置 / 查询计算模式（串行 / 并行 / 自动） |
@@ -115,9 +144,9 @@ g++ -std=c++17 -O2 -fopenmp demo/demo3.cpp -o demo3
 
 | 枚举 | 说明 |
 |---|---|
-| `LMS_DEFAULT` | 默认（未指定具体类型） |
-| `LMS_SOR_SOLVER` | SOR（逐次超松弛）求解器 |
-| `LMS_JACOBI_SOLVER` | Jacobi（雅可比）求解器 |
+| `LMS_SOLVER_TYPE_DEFAULT` | 默认（未指定具体类型） |
+| `LMS_SOLVER_TYPE_SOR` | SOR（逐次超松弛）求解器 |
+| `LMS_SOLVER_TYPE_JACOBI` | Jacobi（雅可比）求解器 |
 
 ## 扩展指南：新增求解器
 
@@ -160,16 +189,18 @@ public:
 
 | 模式 | 说明 |
 |---|---|
-| `LMS_SERIAL_MODE` | 串行（SOR 逐行 / Jacobi 同步更新，默认） |
-| `LMS_MULTI_PROCESS_MODE` | 并行（SOR 红黑染色 / Jacobi 直接并行，需 `-fopenmp`）；SOR 非二分图自动退串行 |
-| `LMS_AUTO_MODE` | 规模足够大且多线程时自动并行，否则串行 |
+| `LMS_CALC_MODE_SERIAL` | 串行（SOR 逐行 / Jacobi 同步更新，默认） |
+| `LMS_CALC_MODE_MULTI_PROCESS_MODE` | 并行（SOR 红黑染色 / Jacobi 直接并行，需 `-fopenmp`）；SOR 非二分图自动退串行 |
+| `LMS_CALC_MODE_AUTO` | 规模足够大且多线程时自动并行，否则串行 |
 
 ## 错误码
 
 所有 API 均返回错误码，完整带注释清单见头文件。
 主要错误码：`LMS_OK`（成功）、`LMS_INI_ERR`、`LMS_VEC_LEN_ERR`、`LMS_MAT_SIZE_ERR`、
-`LMS_DIAG_ELEM_ZERO`、`LMS_NAN_ELEM_ERR`、`LMS_SPARSE_ROW_FULL`、
-`LMS_SPARSE_ROW_NOT_FULL`、`LMS_SOLVE_SET_ERR`、`LMS_NOT_CONVERGED`、`LMS_DIVERGED`、`LMS_MODE_ERR`。
+`LMS_ROW_OVER_LIMIT`、`LMS_DIAG_ELEM_ZERO`、`LMS_NAN_ELEM_ERR`、
+`LMS_SPARSE_ROW_FULL`、`LMS_SPARSE_ROW_NOT_FULL`、`LMS_METHOD_ERR`、
+`LMS_STATUS_REJECT`、`LMS_COOTRIPLES_EMPTY`、`LMS_SOLVE_SET_ERR`、
+`LMS_NOT_CONVERGED`、`LMS_DIVERGED`、`LMS_MODE_ERR`。
 
 ## 收敛性说明
 

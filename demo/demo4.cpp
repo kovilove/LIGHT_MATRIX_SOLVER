@@ -1,7 +1,6 @@
 /**
- * @file example1.cpp
+ * @file demo4.cpp
  * @brief 示例代码
- * @note  10 × 10 稀疏矩阵求解
  */
 
 #include <iostream>
