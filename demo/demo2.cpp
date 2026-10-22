@@ -1,11 +1,11 @@
 /**
  * @file demo2.cpp
  * @brief 示例代码
- * @note  100 × 100 稀疏矩阵求解
+ * @note  100 × 100 稀疏矩阵求解（SORSolver）
  */
 
 #include <iostream>
-#include "../LMS/light_matrix_solver.hpp"
+#include "../LMS/lms.h"
 
 using std::cout;
 using std::endl;
@@ -39,8 +39,10 @@ int main()
             row_vec[i - 1] = 1;
             row_vec[i] += row_vec[i - 1];
         }
-        mat.AddRow(row_vec);
+        mat.AddRow(row_vec, i);
     }
+
+    std::cout << mat.Finalize() << std::endl;
 
     // SORSolver - SOR 求解（解耦架构）
     SORSolver<float> solver(100, 0.5f, 1e-6f);

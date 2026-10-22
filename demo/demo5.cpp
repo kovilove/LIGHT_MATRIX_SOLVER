@@ -1,13 +1,14 @@
 /**
  * @file demo5.cpp
  * @brief 示例代码
- * @note  30000 × 30000 稀疏矩阵求解，演示解耦架构（SparseMatrix 数据 + JacobiSolver 算法）
- *        矩阵组装使用 OpenMP 并行加速；求解当前为串行 SOR（红黑并行将在后续版本加入）
+ * @note  10000 × 10000 稀疏矩阵求解，演示解耦架构（SparseMatrix 数据 + JacobiSolver 算法）
+ *        矩阵组装使用 OpenMP 并行加速；对比串行 Jacobi 与并行 Jacobi 的耗时与结果，
+ *        并校验串 / 并行结果一致性（误差 < 1e-4）
  */
 
 #include <iostream>
 #include <chrono>
-#include "../LMS/light_matrix_solver.hpp"
+#include "../LMS/lms.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -33,7 +34,7 @@ int main()
     rhs[0] = 20;       // 增加非均匀性
     rhs[num - 1] = 20; // 增加非均匀性
 
-    // 设置矩阵尺寸（必须先 Reset，再 SetRhs）
+    // 设置矩阵尺寸（必须先 Reset，再逐行装配）
     mat.Reset(num);
 
     // 逐行组装矩阵（OpenMP 并行加速填充，不影响求解算法）
@@ -56,10 +57,11 @@ int main()
         }
 #pragma omp ordered
         {
-            mat.AddRow(row_vec);
+            mat.AddRow(row_vec, i);
         }
     }
 
+    std::cout << mat.Finalize() << std::endl;
     // JacobiSolver
     JacobiSolver<float> solver(100, 1e-6f);
 

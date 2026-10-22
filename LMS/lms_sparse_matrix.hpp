@@ -1,5 +1,27 @@
-#ifndef SCR_MATRIX_HPP
-#define SCR_MATRIX_HPP
+/**
+ * @file lms_sparse_matrix.hpp
+ * @brief 轻量级稀疏矩阵线性求解头文件库（header-only，C++17）
+ * @details 基于 CSR（Compressed Sparse Row，压缩稀疏行）稀疏存储的线性方程组求解库，
+ *          适用于 CFD 等大规模稀疏线性系统。
+ *
+ *          采用「数据 / 算法解耦 + 策略模式」的可插拔架构：
+ *          - SparseMatrix：矩阵数据容器，只负责存储与组装，不含算法。
+ *            通过 AddRow(vec, row) / AddValue 以 COO 坐标三元组动态装配，
+ *            Finalize 统一排序、压缩并转换为标准 CSR 结构；
+ *          - LinearSolverBase（见lms_linear_solver.hpp）：求解算法抽象基类，定义统一求解接口
+ *            （Solve / 求解模式 / 收敛状态），供上层框架按基类指针运行时可切换求解器；
+ *          - 具体求解器继承基类并实现 Solve：当前实现 SOR（逐次超松弛，含红黑染色并行）
+ *            与 Jacobi（雅可比，含直接并行），未来可扩展 Krylov 子空间法
+ *            （CG / BiCGSTAB / GMRES）、多重网格（AMG / GAMG）等，上层调用无需改动。
+ *
+ *          用法：
+ *          - 装配矩阵：Reset → AddRow(vec, row) / AddValue → Finalize；
+ *          - 重填矩阵：ClearMat → 重新装配（保留矩阵尺寸）；
+ *          - 求解：solver.Solve(mat, x, rhs)（右端项由调用方持有）。
+ */
+
+#ifndef LMS_SPARSE_MATRIX_HPP
+#define LMS_SPARSE_MATRIX_HPP
 
 #include <cmath>
 #include <climits>
@@ -29,16 +51,14 @@ namespace LMS
         LMS_ERR,                 // 通用错误（保留）
         LMS_INI_ERR,             // 矩阵未初始化或初始化参数非法
         LMS_VEC_LEN_ERR,         // 向量长度不足
-        LMS_MAT_SIZE_ERR,        // 矩阵大小不足
-        LMS_ROW_OVER_LIMIT,      // 添加行号超限
+        LMS_OUT_SIZE_LIMIT,      // 添加行/列数超限
         LMS_DIAG_ELEM_ZERO,      // 对角元素为零（SOR 无法迭代）
         LMS_NAN_ELEM_ERR,        // 输入含 NaN/Inf
-        LMS_SPARSE_ROW_FULL,     // 矩阵行已满，无法继续添加
         LMS_SPARSE_ROW_NOT_FULL, // 矩阵未装满，无法求解
-        LMS_METHOD_ERR,          // 添加方法错误（装配方式与调用 API 不匹配）
         LMS_STATUS_REJECT,       // 当前装配状态不允许该操作
         LMS_COOTRIPLES_EMPTY,    // COO 三元组数组为空
         // 求解器相关错误码↓
+        LMS_MARTIX_ERR,    // 求解矩阵不合法
         LMS_SOLVE_SET_ERR, // 求解参数非法（iter/alphaW/tol 越界）
         LMS_NOT_DIAG_DOM,  // 不满足严格对角占优
         LMS_DIAG_DOM,      // 满足严格对角占优
@@ -112,36 +132,22 @@ namespace LMS
 
     protected:
         MatrixBase() = default;
-        size_t colSize_ = {0};   // 矩阵列数
-        size_t rowSize_ = {0};   // 当前已添加的行数
-        bool isValid_ = {false}; // 是否已初始化（Reset 成功）
     };
 
-    // ====================== CSR存储数据矩阵 ======================
+    // ====================== CSR 稀疏存储矩阵 ======================
     /**
      * @brief 基于 CSR 稀疏存储的方阵类（数据容器，仅负责存储与组装，不含迭代算法）
      * @tparam T 浮点类型（float/double），编译期 static_assert 校验
      * @note 非零元素按行压缩存储：value_/colIdx_/rowPtr_ 构成标准 CSR 三元组，
      *       diagIdx_ 记录每行对角元在 value_ 中的下标（求解时 O(1) 访问）
-     * @note 支持两种装配方式：DEFAULT 按行顺序填充（AddRow/AddMultiRow/AddMat），
-     *       COO 以坐标三元组动态装配（AddRow(vec,row)/Finalize）；
-     *       两种方式最终都产出标准 CSR 结构供求解器读取。
+     * @note 装配采用 COO 动态方式：以 AddRow(vec,row) / AddValue 按任意行序添加
+     *       坐标三元组（同一 (row,col) 可重复累加），Finalize 统一排序、压缩并
+     *       转换为标准 CSR 结构供求解器读取。
      * @note 求解算法见 LinearSolverBase / SORSolver；矩阵通过只读访问器
      *       （Values/ColIdx/RowPtr/DiagIdx/Eps/StructureRevision）向求解器暴露内部 CSR 结构；
      *       右端项 b 不存入矩阵，由调用方以 Solve(mat, x, rhs) 参数传入。
      */
 
-    /**
-     * @brief 矩阵装配方式
-     * @note DEFAULT：按行顺序填充 CSR（AddRow/AddMultiRow/AddMat）；
-     *       COO：以坐标三元组动态装配，Finalize 时统一排序压缩为 CSR
-     */
-    enum SparseMatrixAssemblyMethod : unsigned short
-    {
-        LMS_ASSEMBLY_METHOD_DEFAULT = 0,
-        LMS_ASSEMBLY_METHOD_COO,
-        LMS_ASSEMBLY_METHOD_MAX,
-    };
     /**
      * @brief 矩阵装配状态机
      * @note INVALID：未初始化；INIT：已 Reset 待装配；WORKING：装配进行中；
@@ -150,7 +156,6 @@ namespace LMS
     enum SparseMatrixAssemblyStatus : unsigned short
     {
         LMS_ASSEMBLY_STATUS_INVALID = 0,
-        LMS_ASSEMBLY_STATUS_INIT,
         LMS_ASSEMBLY_STATUS_WORKING,
         LMS_ASSEMBLY_STATUS_FINISHED,
         LMS_ASSEMBLY_STATUS_STATUS_MAX,
@@ -159,9 +164,7 @@ namespace LMS
     class SparseMatrix : public MatrixBase
     {
         static_assert(std::is_floating_point_v<T>, "SparseMatrix requires floating-point T");
-        using Arr = T *;
         using Vec = std::vector<T>;
-        using Mat = std::vector<std::vector<T>>;
 
     public:
         SparseMatrix() = default;
@@ -172,7 +175,7 @@ namespace LMS
          * @param colSize 矩阵列数（方阵，即行数），必须大于 2
          * @return LMS_OK 成功；LMS_INI_ERR 尺寸非法（<= 2）
          * @note 按每行约 7 个非零元（如 3D CFD 7 点模板）预留 CSR 内存；
-         *       装配方式重置为 DEFAULT，装配状态置为 INIT
+         *       装配状态置为 INVALID，之后以 AddRow(vec,row) / AddValue 逐行/逐元装配
          */
         unsigned short Reset(size_t colSize = 0) override
         {
@@ -186,10 +189,10 @@ namespace LMS
             }
 
             // 列数固定
-            colSize_ = colSize;
             isValid_ = true;
-            assemblyMethod_ = LMS_ASSEMBLY_METHOD_DEFAULT;
-            assemblyStatus_ = LMS_ASSEMBLY_STATUS_INIT;
+            assemblyStatus_ = LMS_ASSEMBLY_STATUS_INVALID;
+            colSize_ = colSize;
+            rowSize_ = colSize;
             value_.reserve(colSize * 7);
             colIdx_.reserve(colSize * 7);
             rowPtr_.reserve(colSize + 1);
@@ -197,7 +200,6 @@ namespace LMS
             cooTriples_.reserve(colSize * 21);
             // 初始行数偏移为0
             rowPtr_.push_back(0);
-
             return LMS_OK;
         }
 
@@ -206,11 +208,10 @@ namespace LMS
          */
         void Clear() override
         {
+            isValid_ = false;
+            assemblyStatus_ = LMS_ASSEMBLY_STATUS_INVALID;
             colSize_ = 0;
             rowSize_ = 0;
-            isValid_ = false;
-            assemblyMethod_ = LMS_ASSEMBLY_METHOD_DEFAULT;
-            assemblyStatus_ = LMS_ASSEMBLY_STATUS_INVALID;
             structureRevision_ = 0;
             eps_ = static_cast<T>(DEFAULT_EPSILON);
             value_.clear();
@@ -223,12 +224,11 @@ namespace LMS
         /**
          * @brief 清空矩阵系数内容（保留矩阵尺寸，可重新填充）
          * @note 清空 CSR/COO 数据并重置行计数，colSize_/isValid_ 保留，
-         *       装配方式 assemblyMethod_ 保留；清空后可按原方式重新组装矩阵
+         *       清空后可按原方式重新组装矩阵
          */
         void ClearMat()
         {
-            rowSize_ = 0;
-            assemblyStatus_ = LMS_ASSEMBLY_STATUS_INIT;
+            assemblyStatus_ = LMS_ASSEMBLY_STATUS_INVALID;
             structureRevision_++; // 结构变化，求解器需重染色
 
             value_.clear();
@@ -236,15 +236,13 @@ namespace LMS
             rowPtr_.clear();
             diagIdx_.clear();
             cooTriples_.clear();
-
-            value_.reserve(colSize_ * 7);
-            colIdx_.reserve(colSize_ * 7);
-            rowPtr_.reserve(colSize_ + 1);
-            diagIdx_.reserve(colSize_);
-            cooTriples_.reserve(colSize_ * 21);
-
             // 初始行数偏移为0
             rowPtr_.push_back(0);
+        }
+
+        void ZeroCoeff()
+        {
+            std::fill(value_.begin(), value_.end(), T{});
         }
 
         /**
@@ -254,15 +252,6 @@ namespace LMS
         bool IsValid() const
         {
             return isValid_;
-        }
-
-        /**
-         * @brief 查询矩阵是否已装满（已添加行数达到列数，可求解）
-         * @return true 满矩阵，可调用求解器 Solve
-         */
-        bool IsFullMatrix() const
-        {
-            return rowSize_ >= colSize_;
         }
 
         /**
@@ -284,15 +273,6 @@ namespace LMS
         }
 
         /**
-         * @brief 获取当前装配方式
-         * @return assemblyMethod_
-         */
-        SparseMatrixAssemblyMethod AssemblyMethod() const
-        {
-            return assemblyMethod_;
-        }
-
-        /**
          * @brief 获取当前装配状态
          * @return assemblyStatus_
          */
@@ -302,32 +282,10 @@ namespace LMS
         }
 
         /**
-         * @brief 设置矩阵装配方式（须在开始装配前调用）
-         * @param method 目标装配方式（DEFAULT / COO）
-         * @return LMS_OK 成功；LMS_ERR 非法方式；LMS_STATUS_REJECT 已开始装配（WORKING/FINISHED）
-         * @note Reset 后默认 DEFAULT，装配开始后不可再切换
-         */
-        unsigned short SetAssemblyMethod(SparseMatrixAssemblyMethod method)
-        {
-            if (method >= LMS_ASSEMBLY_METHOD_MAX)
-            {
-                return LMS_ERR;
-            }
-            if ((assemblyStatus_ == LMS_ASSEMBLY_STATUS_WORKING) ||
-                (assemblyStatus_ == LMS_ASSEMBLY_STATUS_FINISHED))
-            {
-                return LMS_STATUS_REJECT;
-            }
-            assemblyMethod_ = method;
-            return LMS_OK;
-        }
-
-        /**
          * @brief 获取矩阵非零元素总数
          * @return 非零元个数（CSR value_ 数组长度）
          */
-        size_t
-        NotZeroElemNum() const
+        size_t NotZeroElemNum() const
         {
             return value_.size();
         }
@@ -390,137 +348,22 @@ namespace LMS
             return structureRevision_;
         }
 
-        // ====================== 默认顺序填充矩阵 API ======================
-        /**
-         * @brief 添加矩阵的一行（稠密输入，内部压缩为 CSR 存储）
-         * @param vec 该行数据，长度必须 >= colSize，仅前 colSize 个元素有效
-         * @return LMS_OK 成功；
-         *         LMS_METHOD_ERR 装配方式非 DEFAULT；
-         *         LMS_INI_ERR 矩阵未初始化；LMS_SPARSE_ROW_FULL 行已满；
-         *         LMS_VEC_LEN_ERR 向量长度不足；
-         *         LMS_DIAG_ELEM_ZERO 对角元为零；
-         *         LMS_NAN_ELEM_ERR 元素含 NaN/Inf
-         * @note 每行对角元（vec[rowSize_]）必须非零，否则 SOR 无法迭代；
-         *       NaN/Inf 检查通过后才写入，失败不会留下部分数据
-         */
-        unsigned short AddRow(const Vec &vec)
-        {
-            if (assemblyMethod_ != LMS_ASSEMBLY_METHOD_DEFAULT)
-            {
-                return LMS_METHOD_ERR;
-            }
-            auto result = AddRowByVecAbnormalCheck(vec, rowSize_);
-            if (result != LMS_OK)
-            {
-                return result;
-            }
-            if (IsZeroElem(vec[rowSize_], this->eps_))
-            {
-                return LMS_DIAG_ELEM_ZERO;
-            }
-
-            for (size_t i = 0; i < colSize_; i++)
-            {
-                if (IsZeroElem(vec[i], eps_))
-                {
-                    continue;
-                }
-                value_.push_back(vec[i]);
-                colIdx_.push_back(i);
-                if (i == rowSize_)
-                {
-                    diagIdx_.push_back(colIdx_.size() - 1);
-                }
-            }
-            rowPtr_.push_back(value_.size());
-            rowSize_++;
-            structureRevision_++;
-            assert(rowPtr_.size() == (rowSize_ + 1));
-            assert(diagIdx_.size() == rowSize_);
-            assemblyStatus_ = (rowSize_ >= colSize_) ? LMS_ASSEMBLY_STATUS_FINISHED : LMS_ASSEMBLY_STATUS_WORKING;
-            return LMS_OK;
-        }
-
-        /**
-         * @brief 追加批量行（等价于连续调用 AddRow，保留已有行）
-         * @param mat 待追加的稠密行数组（行向量数组）
-         * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
-         * @return 同 AddRow
-         * @note 与 AddMat 的区别：AddMat 会先清空矩阵再整体重建（覆盖语义），
-         *       本函数在现有行之后继续追加；任一行失败时矩阵被 ClearMat
-         *       （保留矩阵尺寸，可修正后重试）
-         */
-        unsigned short AddMultiRow(const Mat &mat, size_t &errRow)
-        {
-            if (assemblyMethod_ != LMS_ASSEMBLY_METHOD_DEFAULT)
-            {
-                return LMS_METHOD_ERR;
-            }
-            unsigned short result = LMS_OK;
-            for (size_t i = 0; i < mat.size(); i++)
-            {
-                result = AddRow(mat[i]);
-                if (result != LMS_OK)
-                {
-                    errRow = i;
-                    ClearMat();
-                    return result;
-                }
-            }
-            return LMS_OK;
-        }
-
-        /**
-         * @brief 覆盖式批量组装矩阵（先清空现有行，再整体添加）
-         * @param mat 稠密矩阵（行向量数组），行数不能少于 colSize（超出的行按满行报错）
-         * @param errRow 输出参数：失败时返回出错行的行号（0 起始）
-         * @return LMS_MAT_SIZE_ERR 行数不足 colSize；其余同 AddRow
-         * @note 开头先 ClearMat 清空已有行（保留矩阵尺寸）；
-         *       任一行失败时矩阵被 ClearMat（保留矩阵尺寸，可修正后重试）
-         */
-        unsigned short AddMat(const Mat &mat, size_t &errRow)
-        {
-            if (assemblyMethod_ != LMS_ASSEMBLY_METHOD_DEFAULT)
-            {
-                return LMS_METHOD_ERR;
-            }
-            ClearMat();
-            // 检查是否能添加满
-            if (mat.size() < colSize_)
-            {
-                return LMS_MAT_SIZE_ERR;
-            }
-            unsigned short result = LMS_OK;
-            for (size_t i = 0; i < mat.size(); i++)
-            {
-                result = AddRow(mat[i]);
-                if (result != LMS_OK)
-                {
-                    errRow = i;
-                    ClearMat();
-                    return result;
-                }
-            }
-            return LMS_OK;
-        }
-        // ====================== 默认顺序填充矩阵 API ======================
     public:
-        //  ====================== Coo 方式动态填充矩阵 API ======================
+        //  ====================== COO 动态装配 API ======================
         /**
-         * @note 与默认顺序填充不同，COO 方式允许以任意 row 号动态添加矩阵行：
-         *       添加过程仅向三元组数组追加 (col, row, value)，不做结构约束；
-         *       全部添加完成后调用 Finalize 统一排序、压缩并转换为标准 CSR 存储结构。
-         * @warning 装配方式一旦选定（DEFAULT / COO），请勿混用两套 API，
-         *          否则会导致矩阵结构错乱
+         * @note COO 动态装配允许以任意 row 号添加矩阵行/元素：添加过程仅向三元组数组
+         *       追加 (col, row, value)，不做结构约束；全部添加完成后调用 Finalize
+         *       统一排序、压缩并转换为标准 CSR 存储结构。
          */
 
         /**
-         * @brief 以 COO 方式动态添加矩阵的一行（稠密输入）
+         * @brief 以 COO 方式添加矩阵的一行（稠密输入）
          * @param vec 该行数据，长度必须 >= colSize，仅前 colSize 个元素有效
          * @param row 目标行号（0 起始，须 < colSize），非零元以 (col, row) 三元组追加
          * @return LMS_OK 成功；
-         *         LMS_METHOD_ERR 装配方式非 COO；
-         *         LMS_INI_ERR 矩阵未初始化；LMS_ROW_OVER_LIMIT 行号越界；
+         *         LMS_STATUS_REJECT 矩阵已 Finalize（不可再装配）；
+         *         LMS_INI_ERR 矩阵未初始化；
+         *         LMS_OUT_SIZE_LIMIT 行号越界；
          *         LMS_VEC_LEN_ERR 向量长度不足；
          *         LMS_NAN_ELEM_ERR 元素含 NaN/Inf
          * @note 对角元校验延后到 Finalize 统一执行，允许先填非对角元、后补对角元；
@@ -529,11 +372,11 @@ namespace LMS
 
         unsigned short AddRow(const Vec &vec, size_t row)
         {
-            if (assemblyMethod_ != LMS_ASSEMBLY_METHOD_COO)
+            if (assemblyStatus_ == LMS_ASSEMBLY_STATUS_FINISHED)
             {
-                return LMS_METHOD_ERR;
+                return LMS_STATUS_REJECT;
             }
-            auto result = AddRowByVecAbnormalCheck(vec, row);
+            auto result = AddRowCheck(vec, row);
             if (result != LMS_OK)
             {
                 return result;
@@ -551,23 +394,131 @@ namespace LMS
         }
 
         /**
+         * @brief 以 COO 方式添加单个非零元（可重复，Finalize 时自动累加合并）
+         * @param value 非零元值（|value| <= eps 视为零，跳过存储）
+         * @param col 列号（须 < colSize）
+         * @param row 行号（须 < colSize）
+         * @return LMS_OK 成功；
+         *         LMS_STATUS_REJECT 矩阵已 Finalize（不可再装配）；
+         *         LMS_INI_ERR 矩阵未初始化；
+         *         LMS_OUT_SIZE_LIMIT 行列越界；
+         *         LMS_NAN_ELEM_ERR 值含 NaN/Inf
+         */
+        unsigned short AddValue(T value, size_t col, size_t row)
+        {
+            if (assemblyStatus_ == LMS_ASSEMBLY_STATUS_FINISHED)
+            {
+                return LMS_STATUS_REJECT;
+            }
+            auto result = AddValueCheck(value, col, row);
+            if (result != LMS_OK)
+            {
+                return result;
+            }
+            cooTriples_.push_back({col, row, value});
+            assemblyStatus_ = LMS_ASSEMBLY_STATUS_WORKING;
+            return LMS_OK;
+        }
+
+        /**
+         * @brief 查询指定 (col,row) 非零元在 value_ 中的下标（仅 Finalize 后可用）
+         * @param idx 输出：非零元在 value_ 中的下标
+         * @param col 列号
+         * @param row 行号
+         * @return LMS_OK 成功；LMS_STATUS_REJECT 未 Finalize；LMS_ERR 未找到该非零元
+         */
+        unsigned short ValueIdx(size_t &idx, size_t col, size_t row)
+        {
+            if (assemblyStatus_ != LMS_ASSEMBLY_STATUS_FINISHED)
+            {
+                return LMS_STATUS_REJECT;
+            }
+            if (rowPtr_.size() <= row)
+            {
+                return LMS_ERR;
+            }
+
+            for (size_t i = rowPtr_[row]; i < rowPtr_[row + 1]; i++)
+            {
+                if (colIdx_[i] == col)
+                {
+                    idx = i;
+                    return LMS_OK;
+                }
+            }
+            return LMS_ERR;
+        }
+
+        /**
+         * @brief 覆盖指定 (col,row) 非零元的值（仅 Finalize 后可用，该非零元须已存在）
+         * @param value 新值
+         * @param col 列号
+         * @param row 行号
+         * @return LMS_OK 成功；LMS_STATUS_REJECT 未 Finalize；
+         *         LMS_INI_ERR 未初始化；LMS_OUT_SIZE_LIMIT 行列越界；
+         *         LMS_NAN_ELEM_ERR 值含 NaN/Inf；LMS_ERR 未找到该非零元
+         */
+        unsigned short SetValue(T value, size_t col, size_t row)
+        {
+            if (assemblyStatus_ != LMS_ASSEMBLY_STATUS_FINISHED)
+            {
+                return LMS_STATUS_REJECT;
+            }
+            auto result = AddValueCheck(value, col, row);
+            if (result != LMS_OK)
+            {
+                return result;
+            }
+            size_t idx = 0;
+            result = ValueIdx(idx, col, row);
+            if (result == LMS_OK)
+            {
+                value_[idx] = value;
+            }
+            return result;
+        }
+
+        /**
+         * @brief 读取指定 (col,row) 的非零元值（仅 Finalize 后可用）
+         * @param value 输出：该位置的非零元值
+         * @param col 列号
+         * @param row 行号
+         * @return LMS_OK 成功；LMS_STATUS_REJECT 状态非法；
+         *         LMS_OUT_SIZE_LIMIT 行列越界；LMS_ERR 未找到该非零元
+         */
+        unsigned short GetValue(T &value, size_t col, size_t row)
+        {
+            if ((colSize_ == 0) || (rowSize_ == 0) || (!isValid_) ||
+                assemblyStatus_ != LMS_ASSEMBLY_STATUS_FINISHED)
+            {
+                return LMS_STATUS_REJECT;
+            }
+            if ((col >= colSize_) || (row >= rowSize_))
+            {
+                return LMS_OUT_SIZE_LIMIT;
+            }
+            size_t idx = 0;
+            auto result = ValueIdx(idx, col, row);
+            if (result == LMS_OK)
+            {
+                value = value_[idx];
+            }
+            return result;
+        }
+
+        /**
          * @brief COO 装配收尾：排序、压缩并转换为标准 CSR 结构
          * @details ① 将三元组按 (row, col) 升序排序；
          *          ② 单趟压缩：合并重复 (row,col) 的值，生成 value_/colIdx_/rowPtr_；
          *          ③ 定位每行对角元 diagIdx_ 并校验（行缺对角元或对角元为零则失败）；
          *          ④ 成功后清空 COO 数组，装配状态置为 FINISHED，矩阵可求解
          * @return LMS_OK 成功；
-         *         LMS_METHOD_ERR 装配方式非 COO；
          *         LMS_STATUS_REJECT 当前状态非 WORKING（未装配或已收尾）；
          *         LMS_COOTRIPLES_EMPTY COO 数组为空；
          *         LMS_DIAG_ELEM_ZERO 存在行缺少对角元或对角元为零
          */
         unsigned short Finalize()
         {
-            if (assemblyMethod_ != LMS_ASSEMBLY_METHOD_COO)
-            {
-                return LMS_METHOD_ERR;
-            }
             if (assemblyStatus_ != LMS_ASSEMBLY_STATUS_WORKING)
             {
                 return LMS_STATUS_REJECT;
@@ -607,7 +558,9 @@ namespace LMS
                         value_.push_back(sum);
                         colIdx_.push_back(col);
                         if (col == row)
+                        {
                             diagIdx_[row] = colIdx_.size() - 1;
+                        }
                     }
                 }
             }
@@ -635,13 +588,12 @@ namespace LMS
             }
 
             assemblyStatus_ = LMS_ASSEMBLY_STATUS_FINISHED;
-            rowSize_ = colSize_;
             structureRevision_++;
             cooTriples_.clear();
             return LMS_OK;
         }
 
-        //  ====================== Coo 方式动态填充矩阵 API ======================
+        //  ====================== 内部辅助（校验 / 私有成员） ======================
     private:
         /**
          * @brief 检查矩阵是否严格对角占优（|Aii| > Σ|Aij|，j≠i）
@@ -699,24 +651,19 @@ namespace LMS
          * @param row 目标行号（用于越界检查）
          * @return LMS_OK 全部条件通过；否则返回第一个失败条件对应的错误码
          */
-        unsigned short AddRowByVecAbnormalCheck(const Vec &vec, size_t row)
+        unsigned short AddRowCheck(const Vec &vec, size_t row)
         {
             return Check({
                 {[&]() -> bool
                  {
-                     return (this->colSize_ == 0) || (!this->isValid_);
+                     return (this->colSize_ == 0) || (this->rowSize_ == 0) || (!this->isValid_);
                  },
                  LMS_INI_ERR},
                 {[&]() -> bool
                  {
-                     return this->rowSize_ >= this->colSize_;
+                     return row >= this->rowSize_;
                  },
-                 LMS_SPARSE_ROW_FULL},
-                {[&]() -> bool
-                 {
-                     return row >= this->colSize_;
-                 },
-                 LMS_ROW_OVER_LIMIT},
+                 LMS_OUT_SIZE_LIMIT},
                 {[&]() -> bool
                  {
                      return vec.size() < this->colSize_;
@@ -737,25 +684,48 @@ namespace LMS
             });
         }
 
+        unsigned short AddValueCheck(T value, size_t col, size_t row)
+        {
+            return Check({
+                {[&]() -> bool
+                 {
+                     return (this->colSize_ == 0) || (this->rowSize_ == 0) || (!this->isValid_);
+                 },
+                 LMS_INI_ERR},
+                {[&]() -> bool
+                 {
+                     return (col >= this->colSize_) || (row >= this->rowSize_);
+                 },
+                 LMS_OUT_SIZE_LIMIT},
+                {[&]() -> bool
+                 {
+                     return (std::isnan(value) || std::isinf(value));
+                 },
+                 LMS_NAN_ELEM_ERR},
+            });
+        }
+
     private:
-        SparseMatrixAssemblyMethod assemblyMethod_ = {LMS_ASSEMBLY_METHOD_DEFAULT}; // 装配方式（DEFAULT / COO）
-        SparseMatrixAssemblyStatus assemblyStatus_ = {LMS_ASSEMBLY_STATUS_INVALID}; // 装配状态（INVALID/INIT/WORKING/FINISHED）
+        bool isValid_ = {false};                                                    // 是否已初始化（Reset 成功）
+        SparseMatrixAssemblyStatus assemblyStatus_ = {LMS_ASSEMBLY_STATUS_INVALID}; // 装配状态
+        size_t colSize_ = {0};                                                      // 矩阵列数
+        size_t rowSize_ = {0};                                                      // 矩阵行数
+        size_t structureRevision_ = {0};                                            // 矩阵结构版本号（结构变化时递增）
+        T eps_ = static_cast<T>(DEFAULT_EPSILON);                                   // 判零阈值
         std::vector<T> value_;                                                      // 非零元素值（CSR）
         std::vector<size_t> colIdx_;                                                // 非零元素列索引（CSR）
         std::vector<size_t> rowPtr_;                                                // 每行起始偏移（CSR，长度 = 行数+1）
         std::vector<size_t> diagIdx_;                                               // 每行对角元在 value_ 中的下标
-        size_t structureRevision_ = {0};                                            // 矩阵结构版本号（结构变化时递增）
-        T eps_ = static_cast<T>(DEFAULT_EPSILON);                                   // 判零阈值
         // COO 动态添加矩阵行相关参数
         /// @brief COO 坐标三元组：一个非零元的列、行与值
         struct CooTriples
         {
-            size_t col;   // 列号
-            size_t row;   // 行号
-            T value;      // 值
+            size_t col; // 列号
+            size_t row; // 行号
+            T value;    // 值
         };
         std::vector<CooTriples> cooTriples_; // COO 三元组数组（动态装配暂存）
     };
 }
 
-#endif // SCR_MATRIX_HPP
+#endif // LMS_SPARSE_MATRIX_HPP

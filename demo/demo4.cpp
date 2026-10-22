@@ -1,12 +1,13 @@
 /**
  * @file demo4.cpp
  * @brief 示例代码
+ * @note  10 × 10 稀疏矩阵求解（JacobiSolver + 计时示例）
  */
 
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include "../LMS/light_matrix_solver.hpp"
+#include "../LMS/lms.h"
 
 using std::cout;
 using std::endl;
@@ -26,21 +27,24 @@ int main()
 
     // 设置矩阵尺寸
     mat.Reset(num);
-    // AddMat - 添加稠密矩阵
-    mat.AddMat({
-                   {5, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-                   {1, 5, 0, 0, 0, 0, 0, 0, 0, 1},
-                   {1, 0, 5, 0, 0, 0, 0, 0, 0, 1},
-                   {1, 0, 0, 5, 0, 0, 0, 0, 0, 1},
-                   {1, 0, 0, 0, 5, 0, 0, 0, 0, 1},
-                   {1, 5, 0, 0, 0, 5, 0, 0, 0, 1},
-                   {1, 0, 5, 0, 0, 0, 5, 0, 0, 1},
-                   {1, 0, 0, 5, 0, 0, 0, 5, 0, 1},
-                   {1, 0, 0, 0, 0, 0, 0, 0, 5, 1},
-                   {1, 5, 0, 0, 0, 0, 0, 0, 0, 5},
-               },
-               row);
+    // AddRow - 按行号逐行动态添加（COO 装配，行序任意）
+    for (int i = num - 1; i >= 0; i--)
+    {
+        std::vector<float> vec(num, {});
+        vec[i] = float(i + 1) * 2;
+        if (i < num - 1)
+        {
+            vec[i + 1] += float(i + 1);
+        }
+        if (i > 0)
+        {
+            vec[i - 1] += float(i + 1);
+        };
 
+        mat.AddRow(vec, i);
+    }
+
+    std::cout << mat.Finalize() << std::endl;
     // JacobiSolver - Jacobi 求解（解耦架构：矩阵只管数据，求解器只管算法）
     JacobiSolver<float> solver(1000, 1e-6f);
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -54,7 +58,7 @@ int main()
     auto t1 = std::chrono::high_resolution_clock::now();
 
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-    std::cout << "SORSolver Solve time: " << duration.count() << " microseconds" << endl;
+    std::cout << "JacobiSolver Solve time: " << duration.count() << " microseconds" << endl;
     std::cout << "residual: " << solver.GetResidual()
               << ", iter: " << solver.GetIterCount() << endl;
     // 打印机求解量
@@ -62,17 +66,5 @@ int main()
     {
         cout << ele << "\n";
     }
-    /* result:
-        -0.2
-        0.04
-        0.24
-        0.44
-        0.64
-        0.8
-        0.8
-        0.8
-        1.44
-        2
-     */
     return 0;
 }

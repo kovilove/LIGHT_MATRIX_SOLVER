@@ -1,13 +1,13 @@
 /**
- * @file light_matrix_solver.hpp
+ * @file lms_linear_solver.hpp
  * @brief 轻量级稀疏矩阵线性求解头文件库（header-only，C++17）
  * @details 基于 CSR（Compressed Sparse Row，压缩稀疏行）稀疏存储的线性方程组求解库，
  *          适用于 CFD 等大规模稀疏线性系统。
  *
  *          采用「数据 / 算法解耦 + 策略模式」的可插拔架构：
- *          - SparseMatrix（见 csr_matrix.hpp）：矩阵数据容器，只负责存储与组装，不含算法。
- *            支持两种装配方式：DEFAULT 顺序填充（AddRow / AddMultiRow / AddMat）与
- *            COO 动态装配（AddRow(vec,row) / Finalize），最终统一产出标准 CSR 结构；
+ *          - SparseMatrix（见 lms_sparse_matrix.hpp）：矩阵数据容器，只负责存储与组装，不含算法。
+ *            通过 AddRow(vec, row) / AddValue 以 COO 坐标三元组动态装配，
+ *            Finalize 统一排序、压缩并转换为标准 CSR 结构；
  *          - LinearSolverBase：求解算法抽象基类，定义统一求解接口
  *            （Solve / 求解模式 / 收敛状态），供上层框架按基类指针运行时可切换求解器；
  *          - 具体求解器继承基类并实现 Solve：当前实现 SOR（逐次超松弛，含红黑染色并行）
@@ -15,15 +15,15 @@
  *            （CG / BiCGSTAB / GMRES）、多重网格（AMG / GAMG）等，上层调用无需改动。
  *
  *          用法：
- *          - 顺序填充：Reset → AddRow / AddMultiRow / AddMat；
- *          - COO 动态装配：Reset → SetAssemblyMethod(COO) → AddRow(vec,row) → Finalize；
- *          - 重填矩阵：ClearMat → 重新组装（保留矩阵尺寸）；
+ *          - 装配矩阵：Reset → AddRow(vec, row) / AddValue → Finalize；
+ *          - 重填矩阵：ClearMat → 重新装配（保留矩阵尺寸）；
  *          - 求解：solver.Solve(mat, x, rhs)（右端项由调用方持有）。
  */
-#ifndef LIGHT_MATRIX_SOLVER_H
-#define LIGHT_MATRIX_SOLVER_H
 
-#include "csr_matrix.hpp"
+#ifndef LMS_LINEAR_SOLVER_HPP
+#define LMS_LINEAR_SOLVER_HPP
+
+#include "lms_sparse_matrix.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -63,9 +63,7 @@ namespace LMS
     template <typename T>
     class LinearSolverBase
     {
-        using Arr = T *;
         using Vec = std::vector<T>;
-        using Mat = std::vector<std::vector<T>>;
 
     public:
         virtual ~LinearSolverBase() = default;
@@ -202,6 +200,11 @@ namespace LMS
                  LMS_VEC_LEN_ERR},
                 {[&]() -> bool
                  {
+                     return mat.AssemblyStatus() != LMS_ASSEMBLY_STATUS_FINISHED;
+                 },
+                 LMS_MARTIX_ERR},
+                {[&]() -> bool
+                 {
                      for (size_t i = 0; i < mat.ColSize(); ++i)
                      {
                          if (std::isnan(x[i]) || std::isinf(x[i]) ||
@@ -264,9 +267,7 @@ namespace LMS
     template <typename T>
     class SORSolver : public LinearSolverBase<T>
     {
-        using Arr = T *;
         using Vec = std::vector<T>;
-        using Mat = std::vector<std::vector<T>>;
 
     public:
         /**
@@ -636,9 +637,7 @@ namespace LMS
     template <typename T>
     class JacobiSolver : public LinearSolverBase<T>
     {
-        using Arr = T *;
         using Vec = std::vector<T>;
-        using Mat = std::vector<std::vector<T>>;
 
     public:
         /**
@@ -918,4 +917,4 @@ namespace LMS
     };
 }
 
-#endif // LIGHT_MATRIX_SOLVER_H
+#endif // LMS_LINEAR_SOLVER_HPP

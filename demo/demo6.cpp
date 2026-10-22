@@ -7,7 +7,7 @@
 #include <iostream>
 #include <iomanip>
 #include <chrono>
-#include "../LMS/light_matrix_solver.hpp"
+#include "../LMS/lms.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -25,7 +25,6 @@ int main()
     SparseMatrix<float> mat;
 
     mat.Reset(n);
-    std::cout << mat.SetAssemblyMethod(LMS_ASSEMBLY_METHOD_COO) << std::endl;
     for (int i = n - 1; i >= 0; i--)
     {
         std::vector<float> vec(n, {});
@@ -38,16 +37,12 @@ int main()
         {
             vec[i - 1] += float(i + 1);
         };
-        if (i == 4)
-        {
-            continue;
-        }
 
         mat.AddRow(vec, i);
     }
     std::vector<float> vec(n, -1.0);
     mat.AddRow(vec, 4);
-    mat.AddRow(vec, 0);
+    // mat.AddRow(vec, 0);
     /*
     1 1 0 0 0 0 0 0 0 0
     2 2 2 0 0 0 0 0 0 0
