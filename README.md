@@ -116,7 +116,7 @@ g++ -std=c++17 -O2 -fopenmp -I <路径>/LMS your_main.cpp -o app
 
 本库以 header-only 形式对外暴露一个 **INTERFACE 库目标 `LMS`**（别名 `LMS::LMS`），无编译产物，仅传播头文件目录、C++17 要求与可选 OpenMP 支持。**`LMS/CMakeLists.txt` 自包含、可整体移植**——将整个 `LMS` 目录 copy 到你的工程即可复用，不依赖 demo 与仓库根目录。
 
-**方式一：子目录嵌入（推荐，供 CFD_SIMPLE 等工程复用）**
+**方式一：子目录嵌入（推荐）**
 
 ```cmake
 # 1) 把 LMS 目录整个 copy 到你工程的任意子目录，例如 <your>/lib/LMS
