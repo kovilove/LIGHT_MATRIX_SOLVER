@@ -4,14 +4,18 @@
 # 定义 INTERFACE 库目标 LMS（别名 LMS::LMS）。header-only 库无需编译产物，
 # 仅向外暴露：头文件目录、C++17 要求、可选 OpenMP 并行求解支持。
 #
+# 本文件自包含、可整体移植：将整个 LMS 目录 copy 到外部工程的任意子目录，
+# 在外部 CMakeLists 中 add_subdirectory(<copy 后的路径>/LMS) 即可复用，
+# 不依赖 demo、仓库根目录或其他文件。
+#
 # 使用方式一：子目录嵌入（推荐，供 CFD_SIMPLE 等工程复用）
-#   add_subdirectory(<path>/LIGHT_MATRIX_SOLVER)   # 顶层脚本，含 demo 构建选项
-#   # 或 add_subdirectory(<path>/LMS)              # 仅库本身
+#   # 把 LMS 目录放到你的工程下，然后：
+#   add_subdirectory(<你的工程路径>/LMS)     # 或 add_subdirectory(LMS) 若放在根目录
 #   target_link_libraries(your_target PRIVATE LMS)
-#   之后即可 #include "LMS/lms.h"
+#   之后即可 #include "lms.h"
 #
 # 使用方式二：安装 + find_package
-#   cmake -S . -B build -DCMAKE_INSTALL_PREFIX=<prefix> && cmake --install build
+#   cmake -S LMS -B build -DCMAKE_INSTALL_PREFIX=<prefix> && cmake --install build
 #   find_package(LMS REQUIRED)
 #   target_link_libraries(your_target PRIVATE LMS::LMS)
 #
@@ -19,6 +23,7 @@
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.15)
+project(LMS VERSION 1.0.0 LANGUAGES CXX)
 
 if(TARGET LMS)
     return()
@@ -27,10 +32,10 @@ endif()
 add_library(LMS INTERFACE)
 add_library(LMS::LMS ALIAS LMS)
 
-# header-only：仅声明头文件目录与 C++ 标准
+# header-only：头文件位于本目录，将整个目录 copy 到外部工程后 add_subdirectory(LMS) 即可使用
 target_include_directories(LMS INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>   
-    $<INSTALL_INTERFACE:include>                        
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>   # 构建期：本目录（可整体移植）
+    $<INSTALL_INTERFACE:include>                     # 安装期：include 目录
 )
 target_compile_features(LMS INTERFACE cxx_std_17)
 
@@ -65,7 +70,7 @@ install(FILES
     lms.h
     lms_sparse_matrix.hpp
     lms_linear_solver.hpp
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/LMS
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 # 生成包配置文件，使 find_package(LMS) 可用

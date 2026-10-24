@@ -24,21 +24,20 @@
 
 ```
 LIGHT_MATRIX_SOLVER/
-├── CMakeLists.txt                # 顶层构建脚本（构建 demo / 供外部 add_subdirectory 嵌入）
-├── LMS/
-│   ├── CMakeLists.txt            # INTERFACE 库定义（LMS / LMS::LMS，含安装与 find_package 导出）
-│   ├── lms.h                    # 聚合头：统一包含下面两个头文件
-│   ├── lms_sparse_matrix.hpp    # 稀疏矩阵存储 / 装配（COO 动态装配 + CSR 结构，header-only）
-│   ├── lms_linear_solver.hpp    # 求解器：LinearSolverBase + SOR / Jacobi（header-only）
-│   └── cmake/LMSConfig.cmake.in # find_package 包配置文件模板
-├── demo/
-│   ├── demo1.cpp                # 10×10 稀疏系统求解示例（SORSolver）
-│   ├── demo2.cpp                # 100×100 稀疏系统求解示例（SORSolver）
-│   ├── demo3.cpp                # 30000×30000：串行 vs 红黑并行 SOR + 结果一致性校验
-│   ├── demo4.cpp                # 10×10：Jacobi 求解 + 计时示例
-│   ├── demo5.cpp                # 10000×10000：串行 vs 并行 Jacobi + 结果一致性校验
-│   ├── demo6.cpp                # COO 按行动态装配接口效果示例（重复行累加合并）
-│   └── demo7.cpp                # （空文件，待填充新示例）
+├── LMS/                        # 自包含接口库：整个目录可整体 copy 到外部工程复用
+│   ├── CMakeLists.txt          # INTERFACE 库定义（LMS / LMS::LMS，含安装与 find_package 导出）
+│   ├── lms.h                   # 聚合头：统一包含下面两个头文件
+│   ├── lms_sparse_matrix.hpp   # 稀疏矩阵存储 / 装配（COO 动态装配 + CSR 结构，header-only）
+│   ├── lms_linear_solver.hpp   # 求解器：LinearSolverBase + SOR / Jacobi（header-only）
+│   └── cmake/LMSConfig.cmake.in# find_package 包配置文件模板
+├── demo/                       # 示例源码（供本地阅读，不在 CMake 构建范围内）
+│   ├── demo1.cpp               # 10×10 稀疏系统求解示例（SORSolver）
+│   ├── demo2.cpp               # 100×100 稀疏系统求解示例（SORSolver）
+│   ├── demo3.cpp               # 30000×30000：串行 vs 红黑并行 SOR + 结果一致性校验
+│   ├── demo4.cpp               # 10×10：Jacobi 求解 + 计时示例
+│   ├── demo5.cpp               # 10000×10000：串行 vs 并行 Jacobi + 结果一致性校验
+│   ├── demo6.cpp               # COO 按行动态装配接口效果示例（重复行累加合并）
+│   └── demo7.cpp               # （空文件，待填充新示例）
 └── README.md
 ```
 
@@ -47,7 +46,7 @@ LIGHT_MATRIX_SOLVER/
 ```cpp
 #include <iostream>
 #include <vector>
-#include "LMS/lms.h"   // 或直接包含 "LMS/lms_linear_solver.hpp"
+#include "lms.h"   // LMS 目录已加入 include 路径；或直接包含 "lms_linear_solver.hpp"
 
 using namespace LMS;
 
@@ -86,7 +85,7 @@ int main()
 COO 装配支持任意行序与重复累加，适合 CFD 中先拼内部节点、后拼边界的场景：
 
 ```cpp
-#include "LMS/lms.h"
+#include "lms.h"
 using namespace LMS;
 
 SparseMatrix<double> mat;
@@ -100,30 +99,38 @@ mat.AddRow({4.0, 1.0, 0.0}, 0);   // 重复 (0,0)，Finalize 时自动累加合�
 mat.Finalize();                   // 排序压缩 → 标准 CSR，之后即可求解
 ```
 
-任意 C++17 编译器即可编译（并行示例需 `-fopenmp`）：
+任意 C++17 编译器即可编译（并行示例需 `-fopenmp`）。`demo` 内使用相对路径 `../LMS/lms.h`，在仓库根直接编译即可：
 
 ```bash
 g++ -std=c++17 -O2 demo/demo1.cpp -o demo1
 g++ -std=c++17 -O2 -fopenmp demo/demo3.cpp -o demo3
 ```
 
+若在外部工程使用 `#include "lms.h"`，把 LMS 目录加入头文件搜索路径：
+
+```bash
+g++ -std=c++17 -O2 -fopenmp -I <路径>/LMS your_main.cpp -o app
+```
+
 ## CMake 集成（INTERFACE 接口库）
 
-本库以 header-only 形式对外暴露一个 **INTERFACE 库目标 `LMS`**（别名 `LMS::LMS`），无编译产物，仅传播头文件目录、C++17 要求与可选 OpenMP 支持。
+本库以 header-only 形式对外暴露一个 **INTERFACE 库目标 `LMS`**（别名 `LMS::LMS`），无编译产物，仅传播头文件目录、C++17 要求与可选 OpenMP 支持。**`LMS/CMakeLists.txt` 自包含、可整体移植**——将整个 `LMS` 目录 copy 到你的工程即可复用，不依赖 demo 与仓库根目录。
 
 **方式一：子目录嵌入（推荐，供 CFD_SIMPLE 等工程复用）**
 
 ```cmake
-add_subdirectory(<path>/LIGHT_MATRIX_SOLVER)   # 顶层脚本，含 LMS_BUILD_DEMOS 开关
-target_link_libraries(your_target PRIVATE LMS) # 或 PRIVATE LMS::LMS
+# 1) 把 LMS 目录整个 copy 到你工程的任意子目录，例如 <your>/lib/LMS
+# 2) 在你的 CMakeLists 里：
+add_subdirectory(<your>/lib/LMS)        # 或 add_subdirectory(LMS) 若放在根目录
+target_link_libraries(your_target PRIVATE LMS)   # 或 PRIVATE LMS::LMS
 ```
 
-之后即可 `#include "LMS/lms.h"` 使用。OpenMP 作为 INTERFACE 使用要求随链接自动传播给调用方（含链接期 `-fopenmp`，无需调用方手动配置）。
+之后即可 `#include "lms.h"` 使用。OpenMP 作为 INTERFACE 使用要求随链接自动传播给调用方（含链接期 `-fopenmp`，无需调用方手动配置）。
 
 **方式二：安装 + find_package**
 
 ```bash
-cmake -S . -B build && cmake --install build --prefix <prefix>
+cmake -S LMS -B build -DCMAKE_INSTALL_PREFIX=<prefix> && cmake --install build
 ```
 
 消费端：
@@ -133,18 +140,10 @@ find_package(LMS REQUIRED)   # 包配置会自动 find_dependency(OpenMP)
 target_link_libraries(your_target PRIVATE LMS::LMS)
 ```
 
-**独立构建（编译全部 demo 用于验证）：**
-
-```bash
-cmake -S . -B build -G "MinGW Makefiles"
-cmake --build build
-```
-
 开关：
 | 选项 | 默认 | 说明 |
 |---|---|---|
 | `LMS_USE_OPENMP` | ON | 并行求解模式（SOR 红黑 / Jacobi 直接并行）需要 OpenMP |
-| `LMS_BUILD_DEMOS` | ON | 是否构建 demo 可执行文件（嵌入外部工程时建议关掉） |
 
 ## API 一览
 
